@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# ccd, in one file. Install it with:   bash ccd.sh
+# or, from anywhere:   curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
+#
+# What it does: puts ccd, ccdm and ccdr on this Mac (the program goes in ~/.local/share/ccd, the three commands
+# in a folder already on your PATH), then opens a short welcome that offers to add your other Claude accounts.
+# Nothing is downloaded: the program is inside this file. Changes nothing else.
+# Remove it all again with:   ccd uninstall
+set -euo pipefail
+
+SHARE="${HOME}/.local/share/ccd"
+
+fail() { printf 'ccd install: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*"; }
+
+if [ "${1:-}" = "--uninstall" ]; then  # same as: ccd uninstall
+  [ -x "${SHARE}/ccd" ] || fail "ccd isn't installed here."
+  exec "${SHARE}/ccd" uninstall "${@:2}"
+fi
+
+[ "$(uname -s)" = "Darwin" ] || fail "ccd works on macOS for now."
+
+# Python 3.9 or newer, without setting off the "install developer tools" pop-up (/usr/bin/python3 is only a
+# stand-in until those tools are installed).
+PY=""
+for c in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+  p="$(command -v "$c" 2>/dev/null || true)"
+  [ -n "$p" ] || continue
+  if [ "$p" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+  if "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then PY="$p"; break; fi
+done
+[ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
+
+if ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
+  fail "install Claude Code first: curl -fsSL https://claude.ai/install.sh | bash"
+fi
+
+mkdir -p "$SHARE"
+{ printf '#!%s -I\n' "$PY"  # the Python found above, by its path
+  cat <<'CCD_PROGRAM_END'
+@@PROGRAM@@
+CCD_PROGRAM_END
+} > "${SHARE}/ccd.new"
+"$PY" -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${SHARE}/ccd.new" 2>/dev/null \
+  || { rm -f "${SHARE}/ccd.new"; fail "this file is damaged (cut short?); get a fresh copy of ccd.sh"; }
+chmod 755 "${SHARE}/ccd.new"
+mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
+
+# A folder already on PATH, so ccd works in this terminal straight away.
+BIN=""
+for d in "${HOME}/.local/bin" /opt/homebrew/bin /usr/local/bin "${HOME}/bin"; do
+  case ":${PATH}:" in
+    *":${d}:"*) if [ -d "$d" ] && [ -w "$d" ]; then BIN="$d"; break; fi ;;
+  esac
+done
+NEW_TAB=""
+if [ -z "$BIN" ]; then  # none: ~/.local/bin, and the PATH line written for them
+  BIN="${HOME}/.local/bin"
+  mkdir -p "$BIN"
+  RC="${HOME}/.zshrc"
+  case "${SHELL:-}" in */bash) RC="${HOME}/.bash_profile" ;; esac
+  if ! grep -qs '\.local/bin' "$RC"; then
+    printf '\n# ccd\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC"
+  fi
+  NEW_TAB=1
+fi
+
+for n in ccd ccdm ccdr; do
+  t="${BIN}/${n}"
+  if [ -e "$t" ] || [ -L "$t" ]; then
+    if [ ! -L "$t" ] || [ "$(readlink "$t")" != "${SHARE}/ccd" ]; then
+      note "ccd install: ${t} is already there and isn't ccd's, so it was left alone."
+      continue
+    fi
+  fi
+  ln -sfn "${SHARE}/ccd" "$t"
+done
+
+# Their own alias or function called ccd would win over the program.
+for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.zprofile"; do
+  if grep -Eqs '^[[:space:]]*(alias[[:space:]]+(ccd|ccdm|ccdr)=|(function[[:space:]]+)?(ccd|ccdm|ccdr)[[:space:]]*\(\))' "$rc"; then
+    note "ccd install: ${rc/#$HOME/~} has its own ccd, ccdm or ccdr alias, which wins over this one. Remove it to use ccd."
+  fi
+done
+
+# The welcome and the offer to add accounts. Keys come from the terminal, never from this script's input.
+if [ -z "${CCD_NO_SETUP:-}" ] && { : </dev/tty; } 2>/dev/null; then
+  "${BIN}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
+else
+  "${BIN}/ccd" setup </dev/null || true
+fi
+if [ -n "$NEW_TAB" ]; then
+  note "Open a new terminal tab for ccd to be found (${BIN} was added to your PATH)."
+fi
