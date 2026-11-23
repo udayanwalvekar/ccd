@@ -16,6 +16,26 @@ That's the whole install. You can also download [`ccd.sh`](ccd.sh) and run `bash
 
 The installer puts the program in `~/.local/share/ccd`, puts `ccd`, `ccdm` and `ccdr` in a folder already on your PATH, and opens a short welcome that offers to add your other accounts. It changes nothing else. (Only if no suitable folder is on your PATH does it add `~/.local/bin` to it, in `~/.zshrc`.)
 
+<img src="docs/install.png" width="760" alt="The welcome after installing: what ccd does, the accounts it found, and an offer to add another account">
+
+## Why I made this
+
+It started as a simple alias. I always run Claude Code with `--dangerously-skip-permissions`, so `ccd` was just short for that: **C**laude **C**ode, **d**angerously.
+
+Then I needed more usage, so I added more Claude accounts. Every switch meant taking one token out of my `~/.zshrc` and putting the next one in, again and again. So I made ccd do the routing: it checks every account and starts the chat on the one with the most room left.
+
+Then came the next problem. A long chat would run out on its account, and I had two bad options: wait for that account to reset, or ask another Claude to read the old chat and start over. So I automated that too. When a chat hits its limit, ccd reopens the same chat on another account, in the same window, with nothing summarised.
+
+Some tasks are really long and need the usage of a $200 plan, not a $100 one. So `ccd 200` only uses my $200 accounts.
+
+And sometimes I just want to pick the account myself. So I added `ccdm` (m = manual).
+
+<img src="docs/ccdm.png" width="760" alt="ccdm: your accounts with their 5-hour and weekly limits; the one with the most room is highlighted, a full one is greyed out">
+
+For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pick the chat, then the account.
+
+<img src="docs/ccdr.png" width="760" alt="ccdr: your recent chats, the one that stopped at its limit on top">
+
 ## Commands
 
 | Type | What happens |
