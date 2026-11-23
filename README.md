@@ -1,8 +1,12 @@
 # ccd
 
+## Install
+
 ```
 curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
 ```
+
+## What it does
 
 ccd does three main things:
 
@@ -33,13 +37,9 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 "claude_args": []
 ```
 
-## Install
+## Setup
 
-```
-curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
-```
-
-Or ask Claude Code to do it for you:
+You can also ask Claude Code to install it for you:
 
 > Install ccd for me by running `curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash`, then tell me how to add my other Claude accounts.
 
