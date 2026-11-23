@@ -24,7 +24,7 @@ Or ask Claude Code to do it for you:
 
 You need a Mac, [Claude Code](https://claude.com/claude-code) and Python 3.9 or newer.
 
-ccd already knows the account you use in Claude Code. To add your other accounts, type `ccd add` and sign in with each one in your browser.
+ccd already knows the account you use in Claude Code. To add your other accounts, run `ccd add` once for each one and sign in with it in your browser.
 
 ## Why I made this
 
@@ -59,19 +59,19 @@ For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pi
 | `ccd uninstall` | Removes ccd and the accounts you added. |
 | `CCD_AUTO=0 ccd` | Starts a chat that won't move by itself. |
 
-Anything else you type goes straight to Claude Code, like `ccd --model opus`. A chat started that way won't move by itself.
+Anything else you type goes straight to Claude Code, like `ccd --model opus` (except `--help` and `--version`, which ccd answers itself). A chat started that way won't move by itself.
 
-Want the permission prompts back? Put this in `~/.config/ccd/config.json`:
+Want the permission prompts back? Open `~/.config/ccd/config.json` and add this line next to what's already there. Don't replace the file: your accounts are in it.
 
 ```json
-{ "claude_args": [] }
+"claude_args": []
 ```
 
 ## How the move works
 
 - ccd waits 20 seconds first, so you can read the limit message.
-- If the chat is still running something, like a build, it waits for that to finish.
+- If the chat has a command still working, like a build, it waits until that's done. Something that just sits there, like a preview server, isn't waited for: it stops with the move, and Claude is told to restart it.
 - If no account has room, the chat stays as it is, and ccd checks again every 5 minutes.
-- Every move is written to `~/.config/ccd/moves.log`.
+- Every automatic move is written to `~/.config/ccd/moves.log`.
 
 Use ccd only with your own Claude accounts. Sharing a login with someone else is against Anthropic's [terms](https://www.anthropic.com/legal/consumer-terms).
