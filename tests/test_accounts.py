@@ -346,6 +346,38 @@ class ExpiredLogin(unittest.TestCase):
         self.assertNotIn('  0%', text)
 
 
+class ExpiredLoginTwin(unittest.TestCase):
+    def accts(self, org_of_added, answered=True):
+        me = dict(key='main', label='Your login', token='x', expired=True, unchecked=True, five=0.0, week=0.0, blocked=False)
+        other = dict(key='team', label='Team', token=TOKEN)
+        if answered:
+            other.update(five=0.3, week=0.1, blocked=False, org=org_of_added)
+        return [me, other]
+
+    def keys(self, accts, login_org):
+        with mock.patch.object(ccd, 'login_org', return_value=login_org):
+            return [a['key'] for a in ccd.settle(accts)]
+
+    def test_an_expired_login_of_an_added_accounts_organisation_shows_once(self):
+        self.assertEqual(self.keys(self.accts('org-t'), 'org-t'), ['team'])
+
+    def test_another_organisation_keeps_both(self):
+        self.assertEqual(self.keys(self.accts('org-x'), 'org-t'), ['main', 'team'])
+
+    def test_kept_when_that_account_did_not_answer_or_the_organisation_is_unknown(self):
+        self.assertEqual(self.keys(self.accts('org-t', answered=False), 'org-t'), ['main', 'team'])
+        self.assertEqual(self.keys(self.accts('org-t'), None), ['main', 'team'])
+
+    def test_a_login_that_has_not_expired_is_left_to_the_usual_merge(self):
+        accts = self.accts('org-t')
+        accts[0].pop('unchecked')
+        self.assertEqual(self.keys(accts, 'org-t'), ['main', 'team'])
+
+    def test_every_check_goes_through_settle(self):
+        src = open(os.path.join(os.path.dirname(__file__), '..', 'ccd')).read()
+        self.assertEqual(src.count('pool.map(ping, accts)'), src.count('settle(list(pool.map(ping, accts)))'))
+
+
 class NoAccountAtAll(unittest.TestCase):
     def test_ccdm_with_no_account_says_so_not_internet(self):
         with mock.patch.object(sys, 'argv', ['ccdm']), mock.patch.object(ccd, 'accounts', return_value=[]), \
