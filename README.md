@@ -2,6 +2,10 @@
 
 Run Claude Code on all your Claude accounts, with dangerously mode always on.
 
+```
+curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
+```
+
 <img src="docs/install.png" width="760" alt="The welcome after installing: what ccd does, the accounts it found, and an offer to add another account">
 
 ccd does three main things:
