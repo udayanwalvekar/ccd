@@ -21,13 +21,21 @@ fi
 [ "$(uname -s)" = "Darwin" ] || fail "ccd works on macOS for now."
 
 # Python 3.9 or newer, without setting off the "install developer tools" pop-up (/usr/bin/python3 is only a
-# stand-in until those tools are installed).
+# stand-in until those tools are installed). Fixed places first: a python3 early on PATH is often a pyenv or asdf
+# shim (a small script) or a virtualenv that may be deleted later.
 PY=""
-for c in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 python3; do
   p="$(command -v "$c" 2>/dev/null || true)"
   [ -n "$p" ] || continue
   if [ "$p" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
-  if "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then PY="$p"; break; fi
+  "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null || continue
+  # A #! line can't point at another script (bash would run the program itself as shell): the real Python then.
+  if [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then
+    p="$("$p" -I -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+    if [ -z "$p" ] || [ ! -x "$p" ] || [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then continue; fi
+  fi
+  PY="$p"
+  break
 done
 [ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
 
@@ -196,6 +204,9 @@ def token_del(key):
 
 
 def ping(acct):
+    if acct.get('expired'):  # nothing to ask with: counted as half full until a chat on it renews it
+        acct.update(five=0.0, week=0.0, five_reset=0, week_reset=0, blocked=False, unchecked=True)
+        return acct
     req = urllib.request.Request(API, data=PING, headers={
         'Authorization': 'Bearer ' + acct['token'], 'anthropic-beta': 'oauth-2025-04-20',
         'anthropic-version': '2023-06-01', 'content-type': 'application/json'})
@@ -230,14 +241,14 @@ def login():
                               '-a', pwd.getpwuid(os.getuid()).pw_name, '-w'],
                              capture_output=True, text=True, timeout=5).stdout
         c = json.loads(raw)['claudeAiOauth']
-        if c.get('expiresAt', 0) / 1000 > time.time():
-            tier = c.get('rateLimitTier') or ''
-            plan = next((v for k, v in TIERS.items() if k in tier), None)
-            return {'key': 'main', 'label': 'Your Claude Code login' + (' ($%s)' % plan if plan else ''),
-                    'token': c['accessToken'], 'plan': plan}
+        tier = c.get('rateLimitTier') or ''
+        plan = next((v for k, v in TIERS.items() if k in tier), None)
+        # Past its expiry, the login can't be checked, but it still works: claude renews it when a chat starts on it.
+        # (Left out, it would never be used again, so never renewed.)
+        return {'key': 'main', 'label': 'Your Claude Code login' + (' ($%s)' % plan if plan else ''),
+                'token': c['accessToken'], 'plan': plan, 'expired': c.get('expiresAt', 0) / 1000 <= time.time()}
     except Exception:
-        pass
-    return None
+        return None
 
 
 def accounts():
@@ -250,7 +261,15 @@ def accounts():
 
 
 def room(a):
+    if a.get('unchecked'):  # a login past its expiry: used once the checked accounts are half full
+        return 0.5
     return 1 - max(a['five'], a['week'])
+
+
+def how_full(a):
+    if a.get('unchecked'):
+        return 'not checked: it signs in again as the chat starts'
+    return '5-hour %d%% used, weekly %d%% used' % (round(a['five'] * 100), round(a['week'] * 100))
 
 
 # ---- ccdm (`ccd --pick`): he chooses the account from a list ------------------------------------------
@@ -348,8 +367,12 @@ def frame(rws, at, cols, lines):
         on, off = i == at, r['blocked']
         head = [('  ❯ ' if on else '    ', teal + ';1'), ('%d  ' % (i + 1), dim if off else teal if on else ''),
                 (r['label'], dim if off else bold if on else '')]
-        note = [('   at its limit', dim)] if off else [('   most room', teal)] if i == best else []
+        note = [('   at its limit', dim)] if off else [('   not checked', dim)] if r.get('unchecked') else \
+            [('   most room', teal)] if i == best else []
         limits = (('5-hour', r['five'], r.get('five_reset')), ('weekly', r['week'], r.get('week_reset')))
+        if r.get('unchecked'):
+            out += [head + note] + ([[('       signs in again as a chat starts on it', dim)], []] if tall else [])
+            continue
         if not tall:
             out.append(head + note + [('   ' + ' · '.join('%s %d%%' % (n, round(u * 100)) for n, u, _ in limits), dim)])
             continue
@@ -1033,9 +1056,8 @@ def supervise(args, env, account, want):
         if not to or state['closing']:
             return code
         tidy_terminal(saved)
-        print('ccd: this chat reached its limit on %s. Carrying on, on %s (5-hour %d%% used, weekly %d%% used).'
-              % (names.get(account, account), to['label'], round(to['five'] * 100), round(to['week'] * 100)),
-              file=sys.stderr)
+        print('ccd: this chat reached its limit on %s. Carrying on, on %s (%s).'
+              % (names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
         note_move(move['id'], account, to['key'])
         stopped_on[account] = time.time()
         said = '(ccd moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
@@ -1183,6 +1205,12 @@ class Ask:
         termios.tcflush(self.fd, termios.TCIFLUSH)  # keys typed before the question showed are dropped
         try:
             tty.setcbreak(self.fd)
+            mode = termios.tcgetattr(self.fd)
+            off = bytes([os.fpathconf(self.fd, 'PC_VDISABLE')])
+            for k in ('VSUSP', 'VDSUSP', 'VQUIT'):  # they would stop or kill us with the terminal left half set
+                if hasattr(termios, k):
+                    mode[6][getattr(termios, k)] = off
+            termios.tcsetattr(self.fd, termios.TCSANOW, mode)
             self.put('\x1b[?25l')
             while True:
                 lines = draw()
@@ -1428,7 +1456,12 @@ def cmd_add(args):
         token = sys.stdin.read().strip()
         if not TOKEN_RE.fullmatch(token):
             sys.exit('ccd add: give the token on stdin (it starts with sk-ant-oat01-), e.g. ccd add Work 200 < file')
-        got, why = keep(token, name or 'Account %d' % (len(added()) + 2), plan)
+        try:
+            got, why = keep(token, name or 'Account %d' % (len(added()) + 2), plan)
+        except subprocess.TimeoutExpired:
+            got, why = None, "the Keychain didn't answer (is it locked?)"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            got, why = None, "couldn't save it in the Keychain"
         if not got:
             sys.exit('ccd add: nothing added: %s' % why)
         print('ccd: added %s (%s)' % (got['label'], figures(got)))
@@ -1439,6 +1472,9 @@ def cmd_add(args):
         sys.exit('ccd add: no terminal to ask in. Pipe the token in instead: ccd add Work 200 < file')
     try:
         return add_here(ask, name, plan)
+    except KeyboardInterrupt:
+        ask.say([[]])
+        return 130
     finally:
         ask.close()
 
@@ -1479,6 +1515,14 @@ def add_here(ask, name='', plan=None):
         if 'five' in got:
             found = t
             break
+    if not found and how == 0 and 'error' in got and 'internet' not in got['error']:
+        ask.say([[('  · ', dim), ("The token read off the screen didn't work. Copy it from above instead.", dim)]])
+        t = ask.text('Paste the token', secret=True, hint='It starts with sk-ant-oat01-')
+        if t is None:
+            return 130
+        t = re.sub(r'\s+', '', t)
+        got = ping({'key': 'new', 'label': '', 'token': t}) if TOKEN_RE.fullmatch(t) else {'error': 'not a token'}
+        found = t if 'five' in got else None
     if not found:
         ask.say([[('  ✗ ', warm), ("That token didn't work: %s." % (got.get('error') or 'no answer'), '')],
                  [('    Nothing added.', dim)]])
@@ -1513,6 +1557,9 @@ def usage_lines(accts, cols):
     best = max((i for i, r in enumerate(rws) if not r['blocked']), key=lambda i: room(rws[i]), default=None)
     for i, r in enumerate(rws):
         note = [('   at its limit', dim)] if r['blocked'] else [('   most room', teal)] if i == best and len(rws) > 1 else []
+        if r.get('unchecked'):
+            out += [[('    ', ''), (r['label'], '1')], [('       not checked: it signs in again as a chat starts on it', dim)], []]
+            continue
         out.append([('    ', ''), (r['label'], '1')] + note)
         for name, used, reset in (('5-hour', r['five'], r.get('five_reset')), ('weekly', r['week'], r.get('week_reset'))):
             out.append([('       %s  ' % name, dim)] + bar(used, width)
@@ -1611,7 +1658,10 @@ def cmd_setup(args):
             if a != 0:
                 break
             ask.say([[]])
-            add_here(ask)
+            try:
+                add_here(ask)
+            except KeyboardInterrupt:
+                ask.say([[]])
         ask.say([[], [('  ✦ ', teal), ('ccd', teal + ';1'), ('  v%s is ready' % VERSION, dim)], []] + how_to(cols))
         return 0
     finally:
@@ -1635,7 +1685,23 @@ def cmd_uninstall(args):
             return 130
     for key, _, _ in mine:
         token_del(key)
-    shutil.rmtree(HOME, ignore_errors=True)
+    if not file_store():  # and any left behind by a settings file that was lost or edited
+        for _ in range(100):
+            try:
+                if subprocess.run([SECURITY, 'delete-generic-password', '-s', SERVICE, '-l', 'ccd account'] + keychain(),
+                                  capture_output=True, timeout=5).returncode:
+                    break
+            except subprocess.SubprocessError:
+                break
+    for name in ('config.json', 'tokens.json', 'moves.log', 'config.json.tmp', 'tokens.json.tmp'):
+        try:
+            os.unlink(os.path.join(HOME, name))
+        except OSError:
+            pass
+    try:
+        os.rmdir(HOME)  # only if nothing else is in it
+    except OSError:
+        pass
     me = os.path.realpath(sys.argv[0])
     for d in os.environ.get('PATH', '').split(':') + [os.path.expanduser('~/.local/bin')]:
         for n in ('ccd', 'ccdm', 'ccdr'):
@@ -1670,7 +1736,8 @@ def cmd_update(args):
     if not (body.startswith(b'#!/usr/bin/env bash') and b'CCD_PROGRAM_END' in body and found):
         sys.exit("ccd update: what came back doesn't look like ccd. Nothing changed.")
     new = found.group(1).decode()
-    if new == VERSION and '--force' not in args:
+    number = lambda v: tuple(int(x) for x in v.split('.') if x.isdigit())
+    if number(new) <= number(VERSION) and '--force' not in args:
         print('ccd: you have the newest, %s' % VERSION)
         return 0
     with tempfile.NamedTemporaryFile('wb', suffix='.sh', delete=False) as f:
@@ -1759,6 +1826,9 @@ def main():
     if (menu or carry) and not ok:  # nothing to choose, or no account to carry the chat to: say why, start nothing
         who = 'ccdr' if carry else 'ccdm'
         full = rows(accts)
+        if not accts:
+            sys.exit('%s: no account yet. Run claude once and sign in (ccd add for your other accounts). '
+                     'Nothing started.' % who)
         if not full:
             sys.exit('%s: could not reach any account (is the internet on?). Nothing started.' % who)
         print('%s: every %saccount is at its limit. Nothing started.' % (who, '$%d ' % want if want else ''), file=sys.stderr)
@@ -1785,8 +1855,7 @@ def main():
             env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)  # fall back to the keychain login
         else:
             env['CLAUDE_CODE_OAUTH_TOKEN'] = pick['token']
-        print('ccd: using %s (5-hour %d%% used, weekly %d%% used)'
-              % (pick['label'], round(pick['five'] * 100), round(pick['week'] * 100)), file=sys.stderr)
+        print('ccd: using %s (%s)' % (pick['label'], how_full(pick)), file=sys.stderr)
     if os.environ.get('CCD_DRY_RUN'):
         print('ccd: dry run, token source = %s' % ('your Claude Code login' if 'CLAUDE_CODE_OAUTH_TOKEN' not in env else 'an added account'),
               file=sys.stderr)
@@ -1810,6 +1879,8 @@ CCD_PROGRAM_END
 "$PY" -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${SHARE}/ccd.new" 2>/dev/null \
   || { rm -f "${SHARE}/ccd.new"; fail "this file is damaged (cut short?); get a fresh copy of ccd.sh"; }
 chmod 755 "${SHARE}/ccd.new"
+"${SHARE}/ccd.new" --version >/dev/null 2>&1 </dev/null \
+  || { rm -f "${SHARE}/ccd.new"; fail "ccd didn't start with ${PY}; nothing was changed"; }
 mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
 
 # A folder already on PATH, so ccd works in this terminal straight away.
@@ -1820,22 +1891,24 @@ for d in "${HOME}/.local/bin" /opt/homebrew/bin /usr/local/bin "${HOME}/bin"; do
   esac
 done
 NEW_TAB=""
-if [ -z "$BIN" ]; then  # none: ~/.local/bin, and the PATH line written for them
+if [ -z "$BIN" ]; then  # none: ~/.local/bin, and a PATH line for it unless their settings have one
   BIN="${HOME}/.local/bin"
   mkdir -p "$BIN"
   RC="${HOME}/.zshrc"
   case "${SHELL:-}" in */bash) RC="${HOME}/.bash_profile" ;; esac
-  if ! grep -qs '\.local/bin' "$RC"; then
+  if ! grep -Eqs '^[^#]*PATH=.*\.local/bin' "$RC"; then
     printf '\n# ccd\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC"
   fi
   NEW_TAB=1
 fi
 
+BLOCKED=""
 for n in ccd ccdm ccdr; do
   t="${BIN}/${n}"
   if [ -e "$t" ] || [ -L "$t" ]; then
     if [ ! -L "$t" ] || [ "$(readlink "$t")" != "${SHARE}/ccd" ]; then
-      note "ccd install: ${t} is already there and isn't ccd's, so it was left alone."
+      note "ccd install: ${t} is another program, so it was left alone: typing ${n} won't reach ccd."
+      BLOCKED="${BLOCKED} ${n}"
       continue
     fi
   fi
@@ -1849,12 +1922,18 @@ for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.z
   fi
 done
 
-# The welcome and the offer to add accounts. Keys come from the terminal, never from this script's input.
-if [ -z "${CCD_NO_SETUP:-}" ] && { : </dev/tty; } 2>/dev/null; then
-  "${BIN}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
-else
-  "${BIN}/ccd" setup </dev/null || true
+# The welcome and the offer to add accounts (not on an update). Keys come from the terminal, never from this
+# script's input. Always our own copy: a ccd of someone else's may sit in that folder.
+if [ -z "${CCD_NO_SETUP:-}" ]; then
+  if { : </dev/tty; } 2>/dev/null; then
+    "${SHARE}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
+  else
+    "${SHARE}/ccd" setup </dev/null || true
+  fi
+fi
+if [ -n "$BLOCKED" ]; then
+  note "To use ccd anyway, run it by its full path: ${SHARE}/ccd"
 fi
 if [ -n "$NEW_TAB" ]; then
-  note "Open a new terminal tab for ccd to be found (${BIN} was added to your PATH)."
+  note "Open a new terminal tab for ccd to be found."
 fi

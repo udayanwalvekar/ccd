@@ -9,6 +9,7 @@ from unittest import mock
 os.environ['CCD_HOME'] = tempfile.mkdtemp(prefix='ccd-test-')  # never the real settings or Keychain
 os.environ['CCD_TOKEN_STORE'] = 'file'
 ccd = SourceFileLoader('ccd', os.path.join(os.path.dirname(__file__), '..', 'ccd')).load_module()
+ccd.CLAUDE = os.path.join(os.environ['CCD_HOME'], 'no-such-claude')  # never the real claude, whatever slips through
 ccd.FLAGS = ['--dangerously-skip-permissions']  # what most of these tests were written with (a setting, off by default)
 
 

@@ -11,6 +11,7 @@ SANDBOX = tempfile.mkdtemp(prefix='ccd-test-')
 os.environ['CCD_HOME'] = os.path.join(SANDBOX, 'config')  # before loading: where settings and tokens go
 os.environ['CCD_TOKEN_STORE'] = 'file'
 ccd = SourceFileLoader('ccd_accounts', os.path.join(os.path.dirname(__file__), '..', 'ccd')).load_module()
+ccd.CLAUDE = os.path.join(SANDBOX, 'no-such-claude')  # a test that slips through to starting claude fails, never runs it
 
 TOKEN = 'sk-ant-oat01-' + 'Ab3_-' * 20
 OTHER = 'sk-ant-oat01-' + 'Zz9-_' * 20
@@ -292,6 +293,63 @@ class Screens(Clean):
         self.assertIn('Pipe the token', str(e.exception.code))
 
 
+class ExpiredLogin(unittest.TestCase):
+    def keychain(self, expires_in):
+        raw = json.dumps({'claudeAiOauth': {'accessToken': 'x', 'expiresAt': (__import__('time').time() + expires_in) * 1000,
+                                            'rateLimitTier': 'default_claude_max_20x'}})
+        with mock.patch.object(ccd.subprocess, 'run', return_value=mock.Mock(stdout=raw)):
+            return ccd.login()
+
+    def test_an_expired_login_is_kept_not_dropped(self):
+        me = self.keychain(-60)
+        self.assertIsNotNone(me)  # dropped, it would never be used again, so never renewed
+        self.assertTrue(me['expired'])
+        self.assertFalse(self.keychain(3600)['expired'])
+
+    def test_an_expired_login_is_not_asked_over_the_network(self):
+        with mock.patch.object(ccd.urllib.request, 'urlopen') as net:
+            a = ccd.ping({'key': 'main', 'label': 'L', 'token': 'x', 'expired': True})
+        net.assert_not_called()
+        self.assertTrue(a['unchecked'])
+        self.assertEqual(ccd.room(a), 0.5)
+
+    def test_it_is_used_once_the_checked_accounts_are_half_full(self):
+        def pick(other_used):
+            accts = [{'key': 'main', 'label': 'L', 'token': 'x', 'plan': 200, 'expired': True},
+                     {'key': 'work', 'label': 'W', 'token': TOKEN, 'plan': 200}]
+            real = ccd.ping  # (patched below: keep the real one for the expired login)
+            ping = lambda a: real(a) if a.get('expired') else dict(a, five=other_used, week=0.0, blocked=False, org='o')
+            with mock.patch.object(sys, 'argv', ['ccd']), mock.patch.object(ccd, 'accounts', return_value=accts), \
+                 mock.patch.object(ccd, 'ping', side_effect=ping), mock.patch.object(ccd, 'auto_on', return_value=False), \
+                 mock.patch.object(ccd.random, 'choice', side_effect=lambda xs: xs[0]), \
+                 mock.patch.object(ccd.os, 'execve') as ex, redirect_stderr(io.StringIO()) as err:
+                ccd.main()
+            env = ex.call_args.args[2]
+            return env['CCD_ACCOUNT'], err.getvalue()
+        self.assertEqual(pick(0.2)[0], 'work')
+        who, said = pick(0.7)
+        self.assertEqual(who, 'main')
+        self.assertIn('not checked', said)
+
+    def test_the_list_says_not_checked_instead_of_empty_bars(self):
+        rws = [dict(key='main', label='Your login', five=0.0, week=0.0, blocked=False, unchecked=True),
+               dict(key='w', label='Work', five=0.3, week=0.1, blocked=False, org='o')]
+        text = '\n'.join(''.join(t for t, _ in l) for l in ccd.frame(rws, 1, 80, 30))
+        self.assertIn('not checked', text)
+        self.assertNotIn('  0%', text)
+
+
+class NoAccountAtAll(unittest.TestCase):
+    def test_ccdm_with_no_account_says_so_not_internet(self):
+        with mock.patch.object(sys, 'argv', ['ccdm']), mock.patch.object(ccd, 'accounts', return_value=[]), \
+             mock.patch.object(ccd, 'Menu', return_value=mock.Mock()), mock.patch.object(ccd.os, 'execve') as ex, \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as e:
+                ccd.main()
+        self.assertIn('no account yet', str(e.exception.code))
+        ex.assert_not_called()
+
+
 class Flags(unittest.TestCase):
     def test_chats_start_with_no_permission_prompts_unless_the_settings_say_so(self):
         self.assertEqual(ccd.claude_flags({}), ['--dangerously-skip-permissions'])
@@ -322,6 +380,11 @@ class Update(Clean):
     def test_something_that_is_not_ccd_is_never_run(self):
         code, said, run = self.update(b'<html>rate limited</html>')
         self.assertNotEqual(code, 0)
+        run.assert_not_called()
+
+    def test_an_older_version_is_never_installed_over_a_newer_one(self):
+        code, said, run = self.update(b"#!/usr/bin/env bash\nVERSION = '0.1.0'\nCCD_PROGRAM_END\n")
+        self.assertEqual(code, 0)
         run.assert_not_called()
 
     def test_the_same_version_changes_nothing(self):

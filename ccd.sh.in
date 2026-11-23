@@ -21,13 +21,21 @@ fi
 [ "$(uname -s)" = "Darwin" ] || fail "ccd works on macOS for now."
 
 # Python 3.9 or newer, without setting off the "install developer tools" pop-up (/usr/bin/python3 is only a
-# stand-in until those tools are installed).
+# stand-in until those tools are installed). Fixed places first: a python3 early on PATH is often a pyenv or asdf
+# shim (a small script) or a virtualenv that may be deleted later.
 PY=""
-for c in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 python3; do
   p="$(command -v "$c" 2>/dev/null || true)"
   [ -n "$p" ] || continue
   if [ "$p" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
-  if "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then PY="$p"; break; fi
+  "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null || continue
+  # A #! line can't point at another script (bash would run the program itself as shell): the real Python then.
+  if [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then
+    p="$("$p" -I -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+    if [ -z "$p" ] || [ ! -x "$p" ] || [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then continue; fi
+  fi
+  PY="$p"
+  break
 done
 [ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
 
@@ -44,6 +52,8 @@ CCD_PROGRAM_END
 "$PY" -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${SHARE}/ccd.new" 2>/dev/null \
   || { rm -f "${SHARE}/ccd.new"; fail "this file is damaged (cut short?); get a fresh copy of ccd.sh"; }
 chmod 755 "${SHARE}/ccd.new"
+"${SHARE}/ccd.new" --version >/dev/null 2>&1 </dev/null \
+  || { rm -f "${SHARE}/ccd.new"; fail "ccd didn't start with ${PY}; nothing was changed"; }
 mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
 
 # A folder already on PATH, so ccd works in this terminal straight away.
@@ -54,22 +64,24 @@ for d in "${HOME}/.local/bin" /opt/homebrew/bin /usr/local/bin "${HOME}/bin"; do
   esac
 done
 NEW_TAB=""
-if [ -z "$BIN" ]; then  # none: ~/.local/bin, and the PATH line written for them
+if [ -z "$BIN" ]; then  # none: ~/.local/bin, and a PATH line for it unless their settings have one
   BIN="${HOME}/.local/bin"
   mkdir -p "$BIN"
   RC="${HOME}/.zshrc"
   case "${SHELL:-}" in */bash) RC="${HOME}/.bash_profile" ;; esac
-  if ! grep -qs '\.local/bin' "$RC"; then
+  if ! grep -Eqs '^[^#]*PATH=.*\.local/bin' "$RC"; then
     printf '\n# ccd\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC"
   fi
   NEW_TAB=1
 fi
 
+BLOCKED=""
 for n in ccd ccdm ccdr; do
   t="${BIN}/${n}"
   if [ -e "$t" ] || [ -L "$t" ]; then
     if [ ! -L "$t" ] || [ "$(readlink "$t")" != "${SHARE}/ccd" ]; then
-      note "ccd install: ${t} is already there and isn't ccd's, so it was left alone."
+      note "ccd install: ${t} is another program, so it was left alone: typing ${n} won't reach ccd."
+      BLOCKED="${BLOCKED} ${n}"
       continue
     fi
   fi
@@ -83,12 +95,18 @@ for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.z
   fi
 done
 
-# The welcome and the offer to add accounts. Keys come from the terminal, never from this script's input.
-if [ -z "${CCD_NO_SETUP:-}" ] && { : </dev/tty; } 2>/dev/null; then
-  "${BIN}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
-else
-  "${BIN}/ccd" setup </dev/null || true
+# The welcome and the offer to add accounts (not on an update). Keys come from the terminal, never from this
+# script's input. Always our own copy: a ccd of someone else's may sit in that folder.
+if [ -z "${CCD_NO_SETUP:-}" ]; then
+  if { : </dev/tty; } 2>/dev/null; then
+    "${SHARE}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
+  else
+    "${SHARE}/ccd" setup </dev/null || true
+  fi
+fi
+if [ -n "$BLOCKED" ]; then
+  note "To use ccd anyway, run it by its full path: ${SHARE}/ccd"
 fi
 if [ -n "$NEW_TAB" ]; then
-  note "Open a new terminal tab for ccd to be found (${BIN} was added to your PATH)."
+  note "Open a new terminal tab for ccd to be found."
 fi
