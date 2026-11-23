@@ -1,5 +1,7 @@
 # ccd
 
+**ccd = Claude Code, dangerously.** Every chat it starts runs as `claude --dangerously-skip-permissions`: no permission prompts. That's true for `ccd`, `ccdm`, `ccdr` and the automatic move, with no alias to set up.
+
 Run Claude Code on whichever of your Claude accounts has the most room left. When a chat hits its usage limit, ccd moves that same chat to another of your accounts by itself, in the same window, with nothing summarised.
 
 ```
@@ -48,9 +50,9 @@ ccd stays running behind each chat it starts. When the chat stops at a usage lim
 - `CCD_AUTO=0 ccd` switches the automatic move off for one chat. A chat started with extra words for claude (`ccd --model x`) is never moved.
 - Every move is written to `~/.config/ccd/moves.log`.
 
-## Permission prompts are off
+## Dangerously mode: permission prompts are off
 
-Chats start with `claude --dangerously-skip-permissions`, so a chat that moves by itself never sits waiting on a question nobody is there to answer. Claude can then run commands and edit files without asking first. To get Claude Code's own prompts back, put this in `~/.config/ccd/config.json`:
+That's the "d" in ccd. Chats start with `claude --dangerously-skip-permissions`, so a chat that moves by itself never sits waiting on a question nobody is there to answer. Claude can then run commands and edit files without asking first. To get Claude Code's own prompts back, put this in `~/.config/ccd/config.json`:
 
 ```json
 { "claude_args": [] }

@@ -401,6 +401,15 @@ class NoAccountAtAll(unittest.TestCase):
         ex.assert_not_called()
 
 
+class Help(unittest.TestCase):
+    def test_help_says_what_the_name_means_and_lists_the_commands(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            ccd.cmd_help([])
+        for want in ('Claude Code, dangerously', 'ccdm', 'ccdr', 'ccd add', 'ccd update'):
+            self.assertIn(want, out.getvalue())
+
+
 class Flags(unittest.TestCase):
     def test_chats_start_with_no_permission_prompts_unless_the_settings_say_so(self):
         self.assertEqual(ccd.claude_flags({}), ['--dangerously-skip-permissions'])
