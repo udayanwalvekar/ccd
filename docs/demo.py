@@ -1,10 +1,11 @@
 """Runs the real ccd screens on made-up accounts and chats, for the README screenshots. Nothing is checked over the
 network, nothing starts, no real account or chat is read.
   python3 -I docs/demo.py ccdm | ccdr | setup | accounts"""
-import json, os, sys, tempfile, time
+import atexit, json, os, shutil, sys, tempfile, time
 from importlib.machinery import SourceFileLoader
 
 D = tempfile.mkdtemp(prefix='ccd-demo-')
+atexit.register(shutil.rmtree, D, True)
 os.environ.update(CCD_HOME=os.path.join(D, 'config'), CCD_TOKEN_STORE='file', CCD_DRY_RUN='1')
 ccd = SourceFileLoader('ccd', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ccd')).load_module()
 now = time.time()
@@ -29,6 +30,7 @@ def ping(a):
 
 
 ccd.accounts, ccd.ping = accounts, ping
+ccd.setup_token = lambda cols: []  # "Add one" in the demo never runs a sign-in
 ccd.login = lambda: dict(key='main', label=DEMO[0][1], token='demo', plan=200, expired=False)
 ccd.added = lambda: [(k, l, p) for k, l, p, *_ in DEMO[1:]]
 

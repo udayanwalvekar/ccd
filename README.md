@@ -30,7 +30,7 @@ Some tasks are really long and need the usage of a $200 plan, not a $100 one. So
 
 And sometimes I just want to pick the account myself. So I added `ccdm` (m = manual).
 
-<img src="docs/ccdm.png" width="760" alt="ccdm: your accounts with their 5-hour and weekly limits; the one with the most room is picked, a full one is greyed out">
+<img src="docs/ccdm.png" width="760" alt="ccdm: your accounts with their 5-hour and weekly limits; the one with the most room is highlighted, a full one is greyed out">
 
 For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pick the chat, then the account.
 
