@@ -56,6 +56,13 @@ class TokenStore(Clean):
         ccd.token_del('work')
         self.assertIsNone(ccd.token_get('work'))
 
+    def test_a_key_may_have_an_underscore_but_nothing_that_breaks_the_keychain_line(self):
+        ccd.token_put('personal_200', TOKEN)  # keys carried over from an older setup look like this
+        self.assertEqual(ccd.token_get('personal_200'), TOKEN)
+        for bad in ('a b', 'a"b', 'A', 'a;b', ''):
+            with self.assertRaises(ValueError):
+                ccd.token_put(bad, TOKEN)
+
     def test_only_a_real_looking_token_is_kept(self):
         for bad in ('hello', 'sk-ant-api03-' + 'a' * 40, TOKEN + ' rm -rf', TOKEN + '"'):
             with self.assertRaises(ValueError):

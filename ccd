@@ -31,7 +31,7 @@ import time, tty
 import urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 API = 'https://api.anthropic.com/v1/messages'
 PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
                    'system': "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -127,7 +127,7 @@ def token_get(key):
 
 def token_put(key, token):
     """Keep a token. It never goes on a command line (anyone can read those): `security -i` takes it on stdin."""
-    if not TOKEN_RE.fullmatch(token) or not re.fullmatch(r'[a-z0-9-]+', key):
+    if not TOKEN_RE.fullmatch(token) or not re.fullmatch(r'[a-z0-9_-]+', key):  # nothing that could break the line below
         raise ValueError('not a token')
     if file_store():
         d = read_tokens()
