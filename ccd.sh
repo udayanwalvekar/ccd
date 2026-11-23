@@ -78,7 +78,7 @@ import time, tty
 import urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 API = 'https://api.anthropic.com/v1/messages'
 PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
                    'system': "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -249,6 +249,27 @@ def login():
                 'token': c['accessToken'], 'plan': plan, 'expired': c.get('expiresAt', 0) / 1000 <= time.time()}
     except Exception:
         return None
+
+
+def login_org():
+    """The organisation of Claude Code's login, from its own settings file (known even when the login has expired)."""
+    try:
+        with open(os.path.expanduser('~/.claude.json')) as f:
+            org = (json.load(f).get('oauthAccount') or {}).get('organizationUuid')
+        return org if isinstance(org, str) and org else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def settle(accts):
+    """After the checks: an expired login that belongs to the same organisation as an added account that answered
+    is that account under its other name (the login is often the last account signed in to): shown once, not twice.
+    (Two people in one team share an organisation too; their login would then wait until it is renewed.)"""
+    me = next((a for a in accts if a.get('unchecked')), None)
+    org = me and login_org()
+    if org and any(a is not me and 'five' in a and not a.get('unchecked') and a.get('org') == org for a in accts):
+        return [a for a in accts if a is not me]
+    return accts
 
 
 def accounts():
@@ -894,7 +915,7 @@ def room_elsewhere(account, want=None, avoid=()):
     ago (`avoid`), or None. `want` keeps to his plan."""
     accts = accounts()
     with ThreadPoolExecutor(len(accts) or 1) as pool:
-        accts = list(pool.map(ping, accts))
+        accts = settle(list(pool.map(ping, accts)))
     for key in avoid:
         accts = others(accts, key)
     ok = [a for a in others(accts, account)
@@ -1585,7 +1606,7 @@ def cmd_accounts(args):
     accts = accounts()
     if accts:
         with ThreadPoolExecutor(len(accts)) as pool:
-            accts = list(pool.map(ping, accts))
+            accts = settle(list(pool.map(ping, accts)))
     cols = shutil.get_terminal_size((80, 24)).columns
     print('\n'.join(paint(l, cols) for l in usage_lines(accts, cols)))
     return 0
@@ -1802,7 +1823,7 @@ def main():
     try:
         pool = ThreadPoolExecutor(len(accts) or 1)
         try:
-            accts = list(pool.map(ping, accts))
+            accts = settle(list(pool.map(ping, accts)))
         finally:
             pool.shutdown(wait=not menu, cancel_futures=True)  # with the list up, Ctrl-C must not wait for slow checks
         checking = False
@@ -1844,7 +1865,9 @@ def main():
     if not ok and want:
         sys.exit('ccd: no $%d account has room right now (checked: %s)' % (want, ', '.join(a['label'] for a in accts)))
     if not ok:
-        if accts:  # (with no account at all there is nothing to say: claude asks them to sign in)
+        if any('five' in a for a in accts):
+            print('ccd: every account is at its limit; starting with your usual login', file=sys.stderr)
+        elif accts:  # (with no account at all there is nothing to say: claude asks them to sign in)
             print('ccd: could not check any account; starting with your usual login', file=sys.stderr)
     else:
         if pick is None:
