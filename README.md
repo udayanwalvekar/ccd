@@ -1,31 +1,77 @@
 # ccd
 
-Claude Code, dangerously, on all your Claude accounts.
+Run Claude Code on all your Claude accounts, with dangerously mode always on.
 
-<img src="docs/ccdm.png" width="760" alt="ccdm: your accounts with their 5-hour and weekly limits; the one with the most room is highlighted, a full one is greyed out">
+<img src="docs/install.png" width="760" alt="The welcome after installing: what ccd does, the accounts it found, and an offer to add another account">
 
-- Dangerously mode is always on.
-- Add all your Claude subscriptions once. Never swap tokens by hand again.
-- When one account runs out, your chat moves to another one by itself. Same chat. No new chat.
+ccd does three main things:
+
+1. **It always starts Claude Code in dangerously mode.** No permission prompts. Claude doesn't stop to ask you before it runs a command or changes a file.
+2. **You can add all your Claude subscriptions.** You never have to worry about swapping tokens by hand again. ccd starts every chat on the account with the most usage left.
+3. **When one account runs out, ccd moves your chat to another one by itself.** You don't start a new chat. Claude still has the whole conversation, in the same window.
+
+It also gives you a bunch of customisations. They're all below.
+
+## Install
 
 ```
 curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
 ```
 
-Mac only.
+Or ask Claude Code to do it for you:
+
+> Install ccd for me by running `curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash`, then tell me how to add my other Claude accounts.
+
+You need a Mac, [Claude Code](https://claude.com/claude-code) and Python 3.9 or newer.
+
+ccd already knows the account you use in Claude Code. To add your other accounts, type `ccd add` and sign in with each one in your browser.
 
 ## Why I made this
 
-It started as an alias. I always run Claude Code with `--dangerously-skip-permissions`, so ccd was short for that: Claude Code, dangerously.
+It started as a simple alias. I always run Claude Code with `--dangerously-skip-permissions`, so `ccd` was just short for that: **C**laude **C**ode, **d**angerously.
 
-Then I needed more usage, so I added more accounts. Every switch meant swapping tokens in my `~/.zshrc`. Again and again. So now ccd picks the account with the most usage left.
+Then I needed more usage, so I added more Claude accounts. Every switch meant taking one token out of my `~/.zshrc` and putting the next one in, again and again. So I made ccd do it for me: it checks every account and starts the chat on the one with the most usage left.
 
-Then my long chats started running out. I could wait for the reset, or ask another Claude to read the old chat and start over. Both were bad. So now ccd moves the chat to another account by itself.
+Then came the next problem. A long chat would run out on its account, and I had two bad options: wait for that account to reset, or ask another Claude to read the old chat and start over. So I automated that too. Now when a chat hits its limit, ccd reopens the same chat on another account, in the same window, with nothing summarised.
 
-Some tasks need a $200 plan. `ccd 200` only uses those accounts.
+Some tasks are really long and need the usage of a $200 plan, not a $100 one. So `ccd 200` only uses my $200 accounts.
 
-Sometimes I want to pick the account myself. That's `ccdm`, the picture above.
+And sometimes I just want to pick the account myself. So I added `ccdm` (m = manual).
 
-And sometimes I want to move a chat by hand. That's `ccdr`.
+<img src="docs/ccdm.png" width="760" alt="ccdm: your accounts with their 5-hour and weekly limits; the one with the most room is highlighted, a full one is greyed out">
+
+For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pick the chat, then the account.
 
 <img src="docs/ccdr.png" width="760" alt="ccdr: your recent chats, the one that stopped at its limit on top">
+
+## Customisations
+
+| Type | What it does |
+|---|---|
+| `ccd` | Starts a chat on the account with the most usage left. |
+| `ccdm` | Shows all your accounts and how much is left on each. You pick one. |
+| `ccdr` | Shows your recent chats. You pick a chat, then an account, and it carries on there. |
+| `ccd 200` | Only uses your $200 accounts. `ccd 100` only uses your $100 ones. Works with `ccdm` and `ccdr` too. |
+| `ccd accounts` | Shows how much is left on every account. |
+| `ccd add` | Adds another account. |
+| `ccd remove <name>` | Forgets an account. |
+| `ccd update` | Gets the newest ccd. Your accounts stay. |
+| `ccd uninstall` | Removes ccd and the accounts you added. |
+| `CCD_AUTO=0 ccd` | Starts a chat that won't move by itself. |
+
+Anything else you type goes straight to Claude Code, like `ccd --model opus`. A chat started that way won't move by itself.
+
+Want the permission prompts back? Put this in `~/.config/ccd/config.json`:
+
+```json
+{ "claude_args": [] }
+```
+
+## How the move works
+
+- ccd waits 20 seconds first, so you can read the limit message.
+- If the chat is still running something, like a build, it waits for that to finish.
+- If no account has room, the chat stays as it is, and ccd checks again every 5 minutes.
+- Every move is written to `~/.config/ccd/moves.log`.
+
+Use ccd only with your own Claude accounts. Sharing a login with someone else is against Anthropic's [terms](https://www.anthropic.com/legal/consumer-terms).
