@@ -1,5 +1,7 @@
 #!/usr/bin/env -S python3 -I
-"""ccd: start Claude Code on whichever of your Claude accounts has the most room left, and carry a chat over to
+"""ccd = Claude Code, dangerously (every chat starts as claude --dangerously-skip-permissions).
+
+ccd: start Claude Code on whichever of your Claude accounts has the most room left, and carry a chat over to
 another of your accounts by itself when the one it is on runs out.
 
   ccd             start a chat on the account with the most room
@@ -31,7 +33,7 @@ import time, tty
 import urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = '1.0.2'
+VERSION = '1.0.3'
 API = 'https://api.anthropic.com/v1/messages'
 PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
                    'system': "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -1590,7 +1592,7 @@ def welcome(cols):
     return [[], [('  ✦ ', teal), ('ccd', teal + ';1'), ('  v' + VERSION, dim)], rule, [],
             picture, [], [('  Start Claude Code on whichever of your accounts has room.', '')],
             [('  When a chat hits its limit, ccd carries it on, on another account, by itself.', dim)],
-            [('  Chats start with permission prompts off.', dim)], [], rule, []]
+            [('  ccd = Claude Code, dangerously: chats start with permission prompts off.', dim)], [], rule, []]
 
 
 def how_to(cols):
@@ -1690,7 +1692,7 @@ def cmd_uninstall(args):
 
 
 def cmd_help(args):
-    print(__doc__.split('\n\n', 1)[0] + '\n\n' + __doc__.split('\n\n')[1] + '\n\nAny other words go to claude as they are.')
+    print('\n\n'.join(__doc__.split('\n\n')[:3]) + '\n\nAny other words go to claude as they are.')
     return 0
 
 
