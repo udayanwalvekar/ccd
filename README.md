@@ -10,7 +10,28 @@ ccd does three main things:
 2. **You can add all your Claude subscriptions.** You never have to worry about swapping tokens by hand again. ccd starts every chat on the account with the most usage left.
 3. **When one account runs out, ccd moves your chat to another one by itself.** You don't start a new chat. Claude still has the whole conversation, in the same window.
 
-It also gives you a bunch of customisations. They're all below.
+It also gives you a bunch of customisations, listed below.
+
+| Type | What it does |
+|---|---|
+| `ccd` | Starts a chat on the account with the most usage left. |
+| `ccdm` | Shows all your accounts and how much is left on each. You pick one. |
+| `ccdr` | Shows your recent chats. You pick a chat, then an account, and it carries on there. |
+| `ccd 200` | Only uses your $200 accounts. `ccd 100` only uses your $100 ones. Works with `ccdm` and `ccdr` too. |
+| `ccd accounts` | Shows how much is left on every account. |
+| `ccd add` | Adds another account. |
+| `ccd remove <name>` | Forgets an account. |
+| `ccd update` | Gets the newest ccd. Your accounts stay. |
+| `ccd uninstall` | Removes ccd and the accounts you added. |
+| `CCD_AUTO=0 ccd` | Starts a chat that won't move by itself. |
+
+Anything else you type goes straight to Claude Code, like `ccd --model opus` (except `--help` and `--version`, which ccd answers itself). A chat started that way won't move by itself.
+
+Want the permission prompts back? Open `~/.config/ccd/config.json` and add this line next to what's already there. Don't replace the file: your accounts are in it.
+
+```json
+"claude_args": []
+```
 
 ## Install
 
@@ -43,29 +64,6 @@ And sometimes I just want to pick the account myself. So I added `ccdm` (m = man
 For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pick the chat, then the account.
 
 <img src="docs/ccdr.png" width="760" alt="ccdr: your recent chats, the one that stopped at its limit on top">
-
-## Customisations
-
-| Type | What it does |
-|---|---|
-| `ccd` | Starts a chat on the account with the most usage left. |
-| `ccdm` | Shows all your accounts and how much is left on each. You pick one. |
-| `ccdr` | Shows your recent chats. You pick a chat, then an account, and it carries on there. |
-| `ccd 200` | Only uses your $200 accounts. `ccd 100` only uses your $100 ones. Works with `ccdm` and `ccdr` too. |
-| `ccd accounts` | Shows how much is left on every account. |
-| `ccd add` | Adds another account. |
-| `ccd remove <name>` | Forgets an account. |
-| `ccd update` | Gets the newest ccd. Your accounts stay. |
-| `ccd uninstall` | Removes ccd and the accounts you added. |
-| `CCD_AUTO=0 ccd` | Starts a chat that won't move by itself. |
-
-Anything else you type goes straight to Claude Code, like `ccd --model opus` (except `--help` and `--version`, which ccd answers itself). A chat started that way won't move by itself.
-
-Want the permission prompts back? Open `~/.config/ccd/config.json` and add this line next to what's already there. Don't replace the file: your accounts are in it.
-
-```json
-"claude_args": []
-```
 
 ## How the move works
 
