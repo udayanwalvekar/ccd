@@ -329,6 +329,7 @@ class ExpiredLogin(unittest.TestCase):
             with mock.patch.object(sys, 'argv', ['ccd']), mock.patch.object(ccd, 'accounts', return_value=accts), \
                  mock.patch.object(ccd, 'ping', side_effect=ping), mock.patch.object(ccd, 'auto_on', return_value=False), \
                  mock.patch.object(ccd.random, 'choice', side_effect=lambda xs: xs[0]), \
+                 mock.patch.object(ccd, 'login_org', return_value=None), \
                  mock.patch.object(ccd.os, 'execve') as ex, redirect_stderr(io.StringIO()) as err:
                 ccd.main()
             env = ex.call_args.args[2]
@@ -376,6 +377,17 @@ class ExpiredLoginTwin(unittest.TestCase):
     def test_every_check_goes_through_settle(self):
         src = open(os.path.join(os.path.dirname(__file__), '..', 'ccd')).read()
         self.assertEqual(src.count('pool.map(ping, accts)'), src.count('settle(list(pool.map(ping, accts)))'))
+
+
+class EveryAccountFull(unittest.TestCase):
+    def test_full_accounts_are_called_full_not_unreachable(self):
+        accts = [dict(key='a', label='A', token=TOKEN, plan=None)]
+        with mock.patch.object(sys, 'argv', ['ccd']), mock.patch.object(ccd, 'accounts', return_value=accts), \
+             mock.patch.object(ccd, 'ping', side_effect=lambda a: dict(a, five=1.0, week=0.2, blocked=True, org='o')), \
+             mock.patch.object(ccd, 'auto_on', return_value=False), mock.patch.object(ccd.os, 'execve'), \
+             redirect_stderr(io.StringIO()) as err:
+            ccd.main()
+        self.assertIn('every account is at its limit', err.getvalue())
 
 
 class NoAccountAtAll(unittest.TestCase):

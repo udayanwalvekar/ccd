@@ -1818,7 +1818,9 @@ def main():
     if not ok and want:
         sys.exit('ccd: no $%d account has room right now (checked: %s)' % (want, ', '.join(a['label'] for a in accts)))
     if not ok:
-        if accts:  # (with no account at all there is nothing to say: claude asks them to sign in)
+        if any('five' in a for a in accts):
+            print('ccd: every account is at its limit; starting with your usual login', file=sys.stderr)
+        elif accts:  # (with no account at all there is nothing to say: claude asks them to sign in)
             print('ccd: could not check any account; starting with your usual login', file=sys.stderr)
     else:
         if pick is None:
