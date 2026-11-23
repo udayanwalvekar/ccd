@@ -1,0 +1,1939 @@
+#!/usr/bin/env bash
+# ccd, in one file. Install it with:   bash ccd.sh
+# or, from anywhere:   curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
+#
+# What it does: puts ccd, ccdm and ccdr on this Mac (the program goes in ~/.local/share/ccd, the three commands
+# in a folder already on your PATH), then opens a short welcome that offers to add your other Claude accounts.
+# Nothing is downloaded: the program is inside this file. Changes nothing else.
+# Remove it all again with:   ccd uninstall
+set -euo pipefail
+
+SHARE="${HOME}/.local/share/ccd"
+
+fail() { printf 'ccd install: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*"; }
+
+if [ "${1:-}" = "--uninstall" ]; then  # same as: ccd uninstall
+  [ -x "${SHARE}/ccd" ] || fail "ccd isn't installed here."
+  exec "${SHARE}/ccd" uninstall "${@:2}"
+fi
+
+[ "$(uname -s)" = "Darwin" ] || fail "ccd works on macOS for now."
+
+# Python 3.9 or newer, without setting off the "install developer tools" pop-up (/usr/bin/python3 is only a
+# stand-in until those tools are installed). Fixed places first: a python3 early on PATH is often a pyenv or asdf
+# shim (a small script) or a virtualenv that may be deleted later.
+PY=""
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 python3; do
+  p="$(command -v "$c" 2>/dev/null || true)"
+  [ -n "$p" ] || continue
+  if [ "$p" = "/usr/bin/python3" ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
+  "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null || continue
+  # A #! line can't point at another script (bash would run the program itself as shell): the real Python then.
+  if [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then
+    p="$("$p" -I -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+    if [ -z "$p" ] || [ ! -x "$p" ] || [ "$(head -c 2 "$p" 2>/dev/null)" = '#!' ]; then continue; fi
+  fi
+  PY="$p"
+  break
+done
+[ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
+
+if ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
+  fail "install Claude Code first: curl -fsSL https://claude.ai/install.sh | bash"
+fi
+
+mkdir -p "$SHARE"
+{ printf '#!%s -I\n' "$PY"  # the Python found above, by its path
+  cat <<'CCD_PROGRAM_END'
+"""ccd: start Claude Code on whichever of your Claude accounts has the most room left, and carry a chat over to
+another of your accounts by itself when the one it is on runs out.
+
+  ccd             start a chat on the account with the most room
+  ccdm            choose the account from a list first (m = manual)
+  ccdr            reopen a chat on another account, e.g. one that stopped at its limit (r = resume)
+  ccd add         add another of your accounts
+  ccd accounts    every account with its 5-hour and weekly limits
+  ccd remove X    forget an account
+  ccd 200 / 100   only accounts on that plan ($ a month)
+  ccd update      get the newest ccd (your accounts stay)
+
+Your usual Claude Code login needs no setup: ccd reads it from the macOS Keychain and never refreshes it. Accounts you
+add are kept in the Keychain too (service "ccd"); a token only ever goes into the environment of the one chat that
+uses it, and ccd never prints one. An account is checked with a 1-token Haiku call, reading the 5-hour and weekly
+limits from the response headers.
+
+Every chat ccd starts in a terminal is watched: ccd stays behind it, and when the chat stops at a usage limit while
+another account has room, ccd closes it and reopens the same chat there, in the same window. `CCD_AUTO=0` switches
+that off, and a chat started with words of its own for claude (`ccd --model x`) is never watched: claude is then
+started the plain way, with nothing behind it.
+
+Chats start with permission prompts off (claude --dangerously-skip-permissions), so a carried-over chat never sits
+waiting on a question nobody is there to answer.
+Settings: ~/.config/ccd/config.json ("claude_args": the words every chat starts with, [] for Claude Code's own
+permission prompts; "skip_folders": start folders whose chats ccdr leaves out of its list).
+"""
+import datetime, json, os, pwd, random, re, select, shutil, signal, subprocess, sys, termios, textwrap, threading
+import time, tty
+import urllib.error, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+VERSION = '1.0.0'
+API = 'https://api.anthropic.com/v1/messages'
+PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
+                   'system': "You are Claude Code, Anthropic's official CLI for Claude.",
+                   'messages': [{'role': 'user', 'content': 'hi'}]}).encode()
+TIERS = {'max_20x': 200, 'max_5x': 100}  # the Claude Code login's rateLimitTier -> plan
+HOME = os.environ.get('CCD_HOME') or os.path.join(os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'),
+                                                  'ccd')
+CONFIG = os.path.join(HOME, 'config.json')
+TOKENS = os.path.join(HOME, 'tokens.json')  # only where there is no Keychain (CCD_TOKEN_STORE=file)
+SECURITY = '/usr/bin/security'
+SERVICE = 'ccd'  # Keychain items: service "ccd", account = the account's key
+TOKEN_RE = re.compile(r'sk-ant-oat01-[A-Za-z0-9_-]{20,}')
+
+
+def find_claude():
+    me = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ''
+    for path in (os.path.expanduser('~/.local/bin/claude'), shutil.which('claude')):
+        if path and os.access(path, os.X_OK) and os.path.realpath(path) != me:
+            return path
+    return os.path.expanduser('~/.local/bin/claude')
+
+
+def settings():
+    try:
+        with open(CONFIG) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(d):
+    os.makedirs(HOME, mode=0o700, exist_ok=True)
+    tmp = CONFIG + '.tmp'
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
+        json.dump(d, f, indent=2)
+        f.write('\n')
+    os.replace(tmp, CONFIG)
+
+
+def added():
+    """The accounts added with `ccd add`: [(key, label, plan in dollars or None)]."""
+    out = []
+    for a in settings().get('accounts') or []:
+        if isinstance(a, dict) and isinstance(a.get('key'), str) and isinstance(a.get('label'), str):
+            out.append((a['key'], a['label'], a.get('plan') if a.get('plan') in (20, 100, 200) else None))
+    return out
+
+
+CLAUDE = find_claude()
+SKIP_PROMPTS = ['--dangerously-skip-permissions']
+
+
+def claude_flags(d):
+    """The words every chat starts with: no permission prompts, unless the settings say otherwise."""
+    words = d.get('claude_args', SKIP_PROMPTS)
+    return [w for w in words if isinstance(w, str)] if isinstance(words, list) else list(SKIP_PROMPTS)
+
+
+FLAGS = claude_flags(settings())
+SKIP = tuple(w for w in settings().get('skip_folders') or [] if isinstance(w, str) and w)
+
+
+# ---- where tokens are kept: the macOS Keychain (a 0600 file only when CCD_TOKEN_STORE=file) -------------------
+def file_store():
+    return os.environ.get('CCD_TOKEN_STORE') == 'file' or sys.platform != 'darwin'
+
+
+def keychain():
+    return [os.environ['CCD_KEYCHAIN']] if os.environ.get('CCD_KEYCHAIN') else []  # a test keychain
+
+
+def read_tokens():
+    try:
+        with open(TOKENS) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def token_get(key):
+    if file_store():
+        t = read_tokens().get(key)
+        return t if isinstance(t, str) and t else None
+    try:
+        r = subprocess.run([SECURITY, 'find-generic-password', '-s', SERVICE, '-a', key, '-w'] + keychain(),
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def token_put(key, token):
+    """Keep a token. It never goes on a command line (anyone can read those): `security -i` takes it on stdin."""
+    if not TOKEN_RE.fullmatch(token) or not re.fullmatch(r'[a-z0-9-]+', key):
+        raise ValueError('not a token')
+    if file_store():
+        d = read_tokens()
+        d[key] = token
+        os.makedirs(HOME, mode=0o700, exist_ok=True)
+        tmp = TOKENS + '.tmp'
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:
+            json.dump(d, f)
+        os.replace(tmp, TOKENS)
+        return
+    line = 'add-generic-password -U -s %s -a %s -l "ccd account" -w %s%s\n' % (
+        SERVICE, key, token, ''.join(' "%s"' % k for k in keychain()))
+    subprocess.run([SECURITY, '-i'], input=line, capture_output=True, text=True, timeout=10)
+    if token_get(key) != token:
+        raise OSError('the Keychain did not keep it')
+
+
+def token_del(key):
+    if file_store():
+        d = read_tokens()
+        if d.pop(key, None) is not None:
+            with open(os.open(TOKENS, os.O_WRONLY | os.O_TRUNC), 'w') as f:
+                json.dump(d, f)
+        return
+    subprocess.run([SECURITY, 'delete-generic-password', '-s', SERVICE, '-a', key] + keychain(),
+                   capture_output=True, timeout=5)
+
+
+def ping(acct):
+    if acct.get('expired'):  # nothing to ask with: counted as half full until a chat on it renews it
+        acct.update(five=0.0, week=0.0, five_reset=0, week_reset=0, blocked=False, unchecked=True)
+        return acct
+    req = urllib.request.Request(API, data=PING, headers={
+        'Authorization': 'Bearer ' + acct['token'], 'anthropic-beta': 'oauth-2025-04-20',
+        'anthropic-version': '2023-06-01', 'content-type': 'application/json'})
+    try:
+        h = urllib.request.urlopen(req, timeout=8).headers
+    except urllib.error.HTTPError as e:
+        h = e.headers
+        if not h.get('anthropic-ratelimit-unified-status'):
+            try:
+                why = json.loads(e.read().decode()).get('error', {}).get('details', {}).get('error_code', '')
+            except Exception:
+                why = ''
+            acct['error'] = ('its organisation has switched Claude Code off' if why == 'oauth_not_allowed_for_organization'
+                             else 'the token was revoked or has run out' if e.code in (401, 403) else 'error %d' % e.code)
+    except Exception:
+        acct['error'] = 'no answer (is the internet on?)'
+        return acct
+    if h.get('anthropic-ratelimit-unified-status'):
+        f = lambda k: float(h.get('anthropic-ratelimit-unified-' + k) or 0)
+        acct['five'], acct['week'] = f('5h-utilization'), f('7d-utilization')
+        acct['five_reset'], acct['week_reset'] = f('5h-reset'), f('7d-reset')
+        acct['org'] = h.get('anthropic-organization-id')
+        acct['blocked'] = h.get('anthropic-ratelimit-unified-status') == 'rejected'
+    return acct
+
+
+def login():
+    """Claude Code's own login on this Mac, as an account, or None. Read only: never refreshed here (refreshing it
+    would rotate the login Claude Code itself uses)."""
+    try:
+        raw = subprocess.run([SECURITY, 'find-generic-password', '-s', 'Claude Code-credentials',
+                              '-a', pwd.getpwuid(os.getuid()).pw_name, '-w'],
+                             capture_output=True, text=True, timeout=5).stdout
+        c = json.loads(raw)['claudeAiOauth']
+        tier = c.get('rateLimitTier') or ''
+        plan = next((v for k, v in TIERS.items() if k in tier), None)
+        # Past its expiry, the login can't be checked, but it still works: claude renews it when a chat starts on it.
+        # (Left out, it would never be used again, so never renewed.)
+        return {'key': 'main', 'label': 'Your Claude Code login' + (' ($%s)' % plan if plan else ''),
+                'token': c['accessToken'], 'plan': plan, 'expired': c.get('expiresAt', 0) / 1000 <= time.time()}
+    except Exception:
+        return None
+
+
+def accounts():
+    out = [a for a in [login()] if a]
+    for key, label, plan in added():
+        t = token_get(key)
+        if t:
+            out.append({'key': key, 'label': label, 'token': t, 'plan': plan})
+    return out
+
+
+def room(a):
+    if a.get('unchecked'):  # a login past its expiry: used once the checked accounts are half full
+        return 0.5
+    return 1 - max(a['five'], a['week'])
+
+
+def how_full(a):
+    if a.get('unchecked'):
+        return 'not checked: it signs in again as the chat starts'
+    return '5-hour %d%% used, weekly %d%% used' % (round(a['five'] * 100), round(a['week'] * 100))
+
+
+# ---- ccdm (`ccd --pick`): he chooses the account from a list ------------------------------------------
+# Colours are the /usage mod's (account-usage/hooks/register.tsx): cool-to-hot STOPS along a bar, TRACK behind.
+STOPS = [(45, 212, 191), (56, 189, 248), (167, 139, 250), (244, 114, 182), (251, 113, 133)]
+TRACK = (43, 45, 58)
+EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+TRUECOLOR = os.environ.get('COLORTERM') in ('truecolor', '24bit')
+PLAIN = bool(os.environ.get('NO_COLOR'))  # no colour at all (and not when the output is not a terminal)
+
+
+def colour(c, back=False):
+    """SGR code for an RGB colour; the nearest of the 256 where the terminal has no full colour."""
+    kind = 48 if back else 38
+    if TRUECOLOR:
+        return '%d;2;%d;%d;%d' % (kind, c[0], c[1], c[2])
+    if max(c) - min(c) < 24:  # a grey: the 24-step grey ramp is closer than the colour cube
+        return '%d;5;%d' % (kind, 232 + min(23, max(0, round((sum(c) / 3 - 8) / 10))))
+    return '%d;5;%d' % (kind, 16 + 36 * round(c[0] / 51) + 6 * round(c[1] / 51) + round(c[2] / 51))
+
+
+def heat(t):
+    """Colour at t along a bar (0 = empty, cool; 1 = full, hot)."""
+    x = min(max(t, 0), 1) * (len(STOPS) - 1)
+    i = min(int(x), len(STOPS) - 2)
+    return tuple(round(a + (b - a) * (x - i)) for a, b in zip(STOPS[i], STOPS[i + 1]))
+
+
+def until(epoch):
+    if not epoch:
+        return ''
+    m = max(0, round((epoch - time.time()) / 60))
+    d, m = divmod(m, 1440)
+    h, m = divmod(m, 60)
+    return 'resets in ' + ('%dd %dh' % (d, h) if d else '%dh %dm' % (h, m) if h else '%dm' % m)
+
+
+def rows(accts):
+    """What ccdm lists: every account that answered, one row per real account."""
+    out = []
+    for a in accts:
+        if 'five' not in a:
+            continue  # did not answer (revoked, switched off, offline): nothing to choose
+        # The keychain login is often the same account as one of the added tokens. Same organisation AND
+        # the same numbers = the same account (a team has one organisation but a limit per person).
+        twin = next((r for r in out if a.get('org') and r.get('org') == a['org'] and r['blocked'] == a['blocked']
+                     and abs(r['five'] - a['five']) < 0.02 and abs(r['week'] - a['week']) < 0.02), None)
+        if twin is None:
+            out.append(dict(a))
+        elif twin['key'] == 'main':
+            twin['label'] = a['label']  # keep the fuller keychain login, name the row by its owner
+    return out
+
+
+def press(rws, at, key):
+    """One key -> (highlighted row, 'go' | 'quit' | None). A row at its limit cannot be landed on."""
+    free = [i for i, r in enumerate(rws) if not r['blocked']]
+    if key in ('up', 'k', 'down', 'j'):
+        return free[(free.index(at) + (-1 if key in ('up', 'k') else 1)) % len(free)], None
+    if key == 'enter':
+        return at, 'go'
+    if key in ('esc', 'q'):
+        return at, 'quit'
+    if len(key) == 1 and key in '123456789' and int(key) - 1 in free:
+        return int(key) - 1, 'go'
+    return at, None
+
+
+def bar(used, width):
+    """A usage bar as (text, style) pieces: gradient fill, a fractional tip, then the track."""
+    cells = min(max(used, 0), 1) * width
+    full = int(cells)
+    part = EIGHTHS[int((cells - full) * 8)]
+    out = []
+    for i in range(full):
+        c = colour(heat(int(i / width * 24) / 23))
+        if out and out[-1][1] == c:
+            out[-1] = (out[-1][0] + '█', c)
+        else:
+            out.append(('█', c))
+    if part:
+        out.append((part, colour(heat(max(used, 0.01))) + ';' + colour(TRACK, back=True)))
+    out.append((('░' if PLAIN else '█') * (width - full - (1 if part else 0)), colour(TRACK)))
+    return out
+
+
+def frame(rws, at, cols, lines):
+    """The whole screen as lines of (text, style) pieces: a card per account, or one line each if short."""
+    best = max((i for i, r in enumerate(rws) if not r['blocked']), key=lambda i: room(rws[i]))
+    teal, dim, bold = colour(STOPS[0]), '2', '1'
+    tall = lines >= 4 * len(rws) + 5
+    width = max(10, min(28, cols - 46))
+    out = [[], [('  ✦  ', teal), ('Which account for this chat?', bold)], []]
+    for i, r in enumerate(rws):
+        on, off = i == at, r['blocked']
+        head = [('  ❯ ' if on else '    ', teal + ';1'), ('%d  ' % (i + 1), dim if off else teal if on else ''),
+                (r['label'], dim if off else bold if on else '')]
+        note = [('   at its limit', dim)] if off else [('   not checked', dim)] if r.get('unchecked') else \
+            [('   most room', teal)] if i == best else []
+        limits = (('5-hour', r['five'], r.get('five_reset')), ('weekly', r['week'], r.get('week_reset')))
+        if r.get('unchecked'):
+            out += [head + note] + ([[('       signs in again as a chat starts on it', dim)], []] if tall else [])
+            continue
+        if not tall:
+            out.append(head + note + [('   ' + ' · '.join('%s %d%%' % (n, round(u * 100)) for n, u, _ in limits), dim)])
+            continue
+        out.append(head + note)
+        for name, used, reset in limits:
+            out.append([('       %s  ' % name, dim)] + bar(used, width)
+                       + [(' %3d%%' % round(used * 100), colour(heat(max(used, 0.01))) + ';1'),
+                          ('  ·  ' + until(reset) if reset else '', dim)])
+        out.append([])
+    if not tall:
+        out.append([])
+    out.append([('  ↑ ↓ move  ·  Enter start  ·  or press its number  ·  Esc cancel', dim)])
+    return out
+
+
+def paint(pieces, cols):
+    """Pieces -> one terminal line, cut at the screen edge so nothing wraps."""
+    left, out = cols - 1, ''
+    for text, style in pieces:
+        text = text[:max(left, 0)]
+        left -= len(text)
+        if text:
+            out += '\x1b[%sm%s\x1b[0m' % (style, text) if style and not PLAIN else text
+    return out
+
+
+# ---- ccdr (`ccd --carry`): carry a chat over to another account ---------------------------------------
+# A chat is a file on this Mac (~/.claude/projects/<start folder>/<id>.jsonl) and belongs to no account:
+# `claude --resume <id>` started with another account's token reopens the very same chat, nothing summarised.
+PROJECTS = os.path.expanduser('~/.claude/projects')
+LIVE = os.path.expanduser('~/.claude/sessions')  # one <pid>.json per chat open in a window right now
+RECENT = 48 * 3600  # chats untouched for longer are not listed (`ccdr <id>` still reaches them)
+TAIL = 1 << 20  # only the end of a chat file is read: they grow past 100 MB
+NUDGE = ('Carry on from where you stopped. Your last turn was cut off by a usage limit, and this chat has now been '
+         'reopened on a different account with the same history. If my last message was never answered, answer it '
+         'now. Anything that was still running at that moment (background helpers, background commands, timers) '
+         'has ended: use the results that had already come back, check on the rest, and restart only what had '
+         'not finished or is still needed (a preview server, for example).')
+# A copy opened while the first window is still up: that window still owns whatever it left running.
+NUDGE_COPY = ('Carry on from where you stopped. Your last turn was cut off by a usage limit. This is a copy of that '
+              'chat, reopened on a different account with the same history; the first window is still open. If my '
+              'last message was never answered, answer it now. Background helpers, commands and timers that were '
+              'started before belong to that first window and may still be running there: do not assume they stopped, '
+              'and check (their output files, the running processes) before starting any of them a second time.')
+LIMITS = ('usage_limit_reached', 'model_requires_usage_credits')  # the whole account is used up, or one model on it
+
+
+def running(pid, started=None):
+    """Is this the same program that wrote the window file? (A leftover file's number can be reused.)"""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass  # alive, someone else's
+    except (OSError, OverflowError):
+        return False
+    if started:
+        try:
+            now = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True,
+                                 timeout=3, env={'TZ': 'UTC', 'LC_ALL': 'C'}).stdout
+            if now.split() and now.split() != started.split():
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def open_chats():
+    """Chats open in a window right now: {chat id: {'pid', 'name', 'status'}}."""
+    out = {}
+    try:
+        names = os.listdir(LIVE)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith('.json'):
+            continue
+        d = None
+        for last_try in (False, True):  # claude rewrites these files in place: one caught half-written is read again
+            try:
+                with open(os.path.join(LIVE, name)) as f:
+                    d = json.load(f)
+                break
+            except OSError:
+                break
+            except ValueError:
+                if not last_try:
+                    time.sleep(0.05)
+        try:
+            pid, sid = d['pid'], d['sessionId']
+        except Exception:
+            continue
+        if isinstance(pid, int) and sid and running(pid, d.get('procStart')):
+            out[sid] = {'pid': pid, 'name': d.get('name'), 'status': d.get('status'), 'started': d.get('procStart')}
+    return out
+
+
+def env_of(pid, name):
+    """One CCD_… value from that process's environment, or None. Nothing else of it is kept or shown."""
+    try:
+        env = subprocess.run(['/bin/ps', 'eww', '-p', str(pid), '-o', 'command='], capture_output=True, text=True,
+                             timeout=3).stdout
+    except Exception:
+        return None
+    found = re.search(r'(?:^|\s)%s=(\w+)' % re.escape(name), env)
+    return found.group(1) if found else None
+
+
+def account_of(pid):
+    """The account ccd started that window on."""
+    return env_of(pid, 'CCD_ACCOUNT')
+
+
+def behind_of(pid):
+    """The ccd that stays behind that chat (its process number), or None if nothing does."""
+    boss = env_of(pid, 'CCD_BEHIND')
+    return int(boss) if boss and boss.isdigit() else None
+
+
+def when_of(d):
+    try:
+        return datetime.datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).timestamp()
+    except Exception:
+        return None
+
+
+def words_of(message):
+    """The plain words of a chat line; '' for tool traffic."""
+    c = message.get('content')
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return ' '.join(b.get('text') or '' for b in c if isinstance(b, dict) and b.get('type') == 'text')
+    return ''
+
+
+def read_chat(path, any_kind=False, tail=None):
+    """One saved chat -> its name, his last words, where it began, and whether it stopped at a usage limit.
+    None for a file that is not a chat of his (run by a script, empty, unreadable) unless any_kind."""
+    try:
+        size, mtime = os.path.getsize(path), os.path.getmtime(path)
+        with open(path, 'rb') as f:
+            head = f.read(1 << 16)
+            f.seek(max(0, size - (tail or TAIL)))
+            lines = f.read().split(b'\n')
+    except OSError:
+        return None
+    if size > (tail or TAIL):
+        lines = lines[1:]  # the first piece starts mid-line
+    c = {'id': os.path.basename(path)[:-len('.jsonl')], 'path': path, 'limited': False, 'when': mtime, 'open': None}
+    ai = custom = last = typed = entry = seen = later = None
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        kind = d.get('type')
+        if kind == 'ai-title':
+            ai = d.get('aiTitle') or ai
+        elif kind == 'custom-title':
+            custom = d.get('customTitle') or custom
+        elif kind == 'last-prompt':
+            last = d.get('lastPrompt') or last
+        entry = d.get('entrypoint') or entry
+        later = later or d.get('cwd')
+        if kind not in ('user', 'assistant') or d.get('isSidechain'):
+            continue  # helper-agent lines say nothing about the chat itself
+        m = d.get('message') if isinstance(d.get('message'), dict) else {}
+        text = words_of(m)
+        seen = when_of(d) or seen
+        if kind == 'user':
+            if text.strip() and not text.lstrip().startswith('<') and not d.get('isMeta'):
+                typed = text
+        elif d.get('isApiErrorMessage'):
+            if d.get('apiError') in LIMITS or (d.get('error') == 'rate_limit'
+                                               and re.search(r'you.ve (hit|reached) your .*limit', text.lower())):
+                c['limited'], c['when'] = True, when_of(d) or mtime
+        elif m.get('model') != '<synthetic>':
+            c['limited'] = False  # it answered after the limit: it has carried on since
+    if not c['limited']:
+        c['when'] = seen or mtime
+    tidy = lambda t: ' '.join(t.split()) if isinstance(t, str) else None
+    c['said'] = tidy(last) or tidy(typed)
+    c['title'] = tidy(custom) or tidy(ai) or c['said']
+    began = re.search(rb'"cwd":"((?:[^"\\]|\\.)*)"', head)  # the folder it began in; later lines follow its `cd`s
+    try:
+        c['cwd'] = json.loads(b'"' + began.group(1) + b'"') if began else later
+    except ValueError:
+        c['cwd'] = later
+    if any_kind:
+        c['title'] = c['title'] or c['id']
+        return c
+    if not c['title'] or (entry or '').startswith('sdk'):
+        return None
+    return c
+
+
+def folders():
+    try:
+        return [e.path for e in os.scandir(PROJECTS) if e.is_dir()]
+    except OSError:
+        return []
+
+
+def chats(now=None):
+    """His recent chats: the ones that stopped at a limit first (latest stop first), then the rest, newest first."""
+    now = now or time.time()
+    out = []
+    for folder in folders():
+        if any(bot in os.path.basename(folder) for bot in SKIP):
+            continue
+        try:
+            files = [e.path for e in os.scandir(folder)
+                     if e.name.endswith('.jsonl') and e.is_file() and now - e.stat().st_mtime < RECENT]
+        except OSError:
+            continue
+        out += [c for c in map(read_chat, files) if c]
+    live = open_chats() if out else {}
+    for c in out:
+        c['open'] = live.get(c['id'])
+    return sorted(out, key=lambda c: (not c['limited'], -c['when']))
+
+
+def find_chat(sid):
+    """The chat with exactly this id, however old; None if there is none (never a near match)."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', sid or ''):
+        return None
+    for folder in folders():
+        path = os.path.join(folder, sid + '.jsonl')
+        try:
+            there = sid + '.jsonl' in os.listdir(folder)  # the disk ignores capitals; an id does not
+        except OSError:
+            continue
+        if there and os.path.isfile(path):
+            c = read_chat(path, any_kind=True)
+            if c:
+                c['open'] = open_chats().get(sid)
+                return c
+    return None
+
+
+def ago(secs):
+    m = int(secs // 60)
+    if m < 1:
+        return 'just now'
+    if m < 60:
+        return '%d min ago' % m
+    h = m // 60
+    if h < 24:
+        return '%d h ago' % h
+    return 'yesterday' if h < 48 else '%d days ago' % (h // 24)
+
+
+def shown(chs, lines):
+    """How many chats the list shows at once: what fits (three lines each), never more than the nine number keys."""
+    return max(1, min(9, len(chs), (lines - 5) // 3))
+
+
+def scroll(total, at, top, n):
+    """The first row on screen, moved just enough to keep the highlighted one in view."""
+    top = at if at < top else at - n + 1 if at >= top + n else top
+    return max(0, min(top, total - n))
+
+
+def press_chat(total, at, key, top=0, n=None):
+    """One key on the chat list -> (highlighted row, 'go' | 'quit' | None). Arrows reach every chat; a number
+    means the row with that number on screen."""
+    n = total if n is None else n
+    if key in ('up', 'k'):
+        return (at - 1) % total, None
+    if key in ('down', 'j'):
+        return (at + 1) % total, None
+    if key == 'enter':
+        return at, 'go'
+    if key in ('esc', 'q'):
+        return at, 'quit'
+    if key and len(key) == 1 and key in '123456789' and int(key) <= min(n, total - top):
+        return top + int(key) - 1, 'go'
+    return at, None
+
+
+def cut(text, width):
+    return text if len(text) <= width else text[:max(width - 1, 0)] + '…'
+
+
+def chat_frame(chs, at, cols, lines, now, top=0):
+    """The ccdr list as lines of (text, style) pieces: name + when it stopped, then his last words + folder."""
+    teal, warm, dim, bold = colour(STOPS[0]), colour(STOPS[4]), '2', '1'
+    home = os.path.expanduser('~')
+    n = shown(chs, lines)
+    out = [[], [('  ✦  ', teal), ('Which chat do you want to carry on?', bold)], []]
+    for i, c in enumerate(chs[top:top + n]):
+        on = top + i == at
+        note = '   ' + ('stopped at its limit · ' if c['limited'] else '') + ago(now - c['when'])
+        out.append([('  ❯ ' if on else '    ', teal + ';1'), ('%d  ' % (i + 1), teal if on else ''),
+                    (cut(c['title'], max(12, cols - 8 - len(note))), bold if on else ''),
+                    (note, warm if c['limited'] else dim)])
+        where = c.get('cwd') or ''
+        where = '~' + where[len(home):] if where.startswith(home) else where
+        where = where if len(where) <= 40 else '…' + where[-39:]  # a deep folder: its end says the most
+        tail = ('  ·  open in another window' if c.get('open') else '') + ('  ·  ' + where if where else '')
+        said = c.get('said') if c.get('said') != c['title'] else None  # unnamed chat: the name is already his words
+        said = '“%s”' % cut(said, max(12, cols - 10 - len(tail))) if said else ''
+        out.append([('       ' + said + (tail if said else tail[5:]), dim)])
+        out.append([])
+    if len(chs) > n:
+        out.append([('  %d more · ↑ ↓ scrolls to them' % (len(chs) - n), dim)])
+    out.append([('  ↑ ↓ move  ·  Enter carry on  ·  or press its number  ·  Esc cancel', dim)])
+    return out
+
+
+def waiting(key, is_open):
+    """The wait screen, one look: 'copy' (he pressed c), 'quit', 'same' (the other window has closed) or None."""
+    if key == 'c':
+        return 'copy'
+    if key in ('esc', 'q'):
+        return 'quit'
+    return None if is_open else 'same'
+
+
+def wait_frame(chat, cols=80):
+    """Shown when the chat he picked is still open in another window: two windows must not write one chat.
+    Wrapped to the window, so no instruction is ever cut short."""
+    teal, warm, dim, bold = colour(STOPS[0]), colour(STOPS[4]), '2', '1'
+    live = chat.get('open') or {}
+    end = ' is still open in another window' + (' (%s)' % live['name'] if live.get('name') else '')
+    width = max(30, cols - 1)
+
+    def para(text, style='', lead='     '):
+        return [[(lead + line, style)] for line in textwrap.wrap(text, max(20, width - len(lead)))]
+
+    out = [[], [('  ✦  ', teal), ('“%s”' % cut(chat['title'], max(12, width - 7 - len(end))), bold), (end, '')], []]
+    out += para('A chat can only run in one place at a time. Close it there (Esc, then Ctrl-C twice) and it carries '
+                'on here by itself.')
+    if live.get('status') in ('shell', 'busy'):
+        out += para('It has something still running. Closing that window stops it.', warm)
+    out += [[], [('     c    ', teal), ('open a copy here and leave that window as it is', '')]]
+    if chat.get('limited'):
+        out += para('That window starts again by itself when its limit resets. To stop that, press Esc in that '
+                    'window.', dim, '          ')
+    out += [[('     Esc  ', teal), ('cancel', '')], [], [('     Waiting for that window to close…', dim)]]
+    return out
+
+
+def carry_chat(given):
+    """`ccdr`: the chat he wants carried over: the one with this id, or his pick from the list. Exits if none."""
+    if given:
+        chat = find_chat(given)
+        if chat is None:  # an id that matches nobody: say so, never guess a near one
+            sys.exit('ccdr: no chat with the id %s on this Mac. Nothing started.' % given)
+    else:
+        found = chats()
+        if not found:
+            sys.exit('ccdr: no chat from the last two days to carry on. Nothing started.')
+        try:
+            menu = Menu('Looking at your chats…')
+        except (OSError, termios.error):
+            sys.exit("ccdr: no terminal to ask in. Nothing started. Give the chat's id: ccdr <id>")
+        try:
+            chat = menu.choose_chat(found)
+        except KeyboardInterrupt:
+            chat = None
+        finally:
+            menu.close()
+        if chat is None:
+            sys.exit(130)  # he backed out: start nothing
+    chat['open'] = open_chats().get(chat['id'])  # as it is now, not as it was when the list was drawn
+    if chat['limited'] and chat['open']:
+        chat['account'] = account_of(chat['open']['pid'])
+    return chat
+
+
+def others(accts, was):
+    """The accounts that are not the one called `was`, nor that same account under its other name (the keychain
+    login is often one of the added tokens: same organisation and the same figures)."""
+    old = next((a for a in accts if a['key'] == was), None)
+
+    def same(a):
+        return a['key'] == was or bool(old and 'five' in old and 'five' in a and a.get('org') and a['org'] == old.get('org')
+                                       and abs(a['five'] - old['five']) < 0.02 and abs(a['week'] - old['week']) < 0.02)
+    return [a for a in accts if not same(a)]
+
+
+def elsewhere(ok, accts, chat):
+    """A chat that stopped at a limit does not reopen on the account it stopped on while another has room: a limit
+    on one model does not show in the overall figures, so that account can look like the emptiest."""
+    if not (chat['limited'] and chat.get('account')):
+        return ok
+    rest = others(accts, chat['account'])
+    return [a for a in ok if a in rest] or ok
+
+
+def carry_words(chat, extra):
+    """An account with room is known. Make sure the chat is open nowhere else, then: the words that make claude
+    reopen it. Exits if he backs out."""
+    copy = False
+    live = open_chats().get(chat['id'])  # once more: checking the accounts and his choosing took time
+    if live and os.environ.get('CCD_DRY_RUN'):
+        print('ccd: dry run, that chat is still open in another window; a real run waits for it to close',
+              file=sys.stderr)
+    elif live:
+        chat['open'] = live
+        try:
+            menu = Menu('Looking at your chats…')
+        except (OSError, termios.error):
+            sys.exit('ccdr: that chat is still open in another window and there is no terminal to ask in. '
+                     'Close that window, then try again. Nothing started.')
+        boss = behind_of(live['pid'])  # the ccd behind that chat may close it and reopen it there by itself
+        try:  # the window's own processes are watched, not its file: a file can be caught mid-rewrite
+            how = menu.wait(chat, lambda: running(live['pid'], live.get('started')) or bool(boss and running(boss)))
+        except KeyboardInterrupt:
+            how = None
+        finally:
+            menu.close()
+        if how is None:
+            sys.exit(130)
+        copy = how == 'copy'
+        if not copy:
+            time.sleep(0.7)  # the window that just closed is still writing its last lines
+    if chat.get('cwd') and os.path.isdir(chat['cwd']):
+        os.chdir(chat['cwd'])  # claude keeps a chat under the folder it began in
+    print('ccdr: carrying on “%s”%s' % (cut(chat['title'], 58), ' as a copy' if copy else ''), file=sys.stderr)
+    # His own words after the id go to claude as they are; the carry-on note is only sent when he gave none.
+    note = [NUDGE_COPY if copy else NUDGE] if chat['limited'] and not extra else []
+    return ['--resume', chat['id']] + (['--fork-session'] if copy else []) + note + extra
+
+
+# ---- the automatic move: ccd stays behind the chat and carries it over when it stops at a limit --------
+WATCH_EVERY = 3  # seconds between looks at the chat
+WATCH_TAIL = 1 << 18  # bytes of the chat file read at each look that finds it changed
+GRACE = 20  # seconds a chat sits at its limit before it is moved: he may be reading the message
+RETRY = 300  # seconds between account checks while no account has room
+AVOID = 3600  # seconds a chat keeps away from an account it stopped on (one model's limit hides in the figures)
+MIN_ROOM = 0.05  # an account this close to full is not worth a move: each move re-reads the whole chat at full price
+CPU_BUSY = 5.0  # percent of one processor: above it, a background command of the chat counts as working
+CPU_WINDOW = 15  # seconds it must stay below that before the chat may be closed (a batch pauses between jobs)
+MOVES = os.path.join(HOME, 'moves.log')
+
+
+def auto_on():
+    """ccd stays behind the chat only in a real terminal, and not when he has switched it off."""
+    try:
+        return os.environ.get('CCD_AUTO') != '0' and sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):  # started with its input or output closed
+        return False
+
+
+def window_of(pid):
+    """What the window run by this process is showing now: {'sessionId', 'status'}, or None."""
+    for last_try in (False, True):
+        try:
+            with open(os.path.join(LIVE, '%d.json' % pid)) as f:
+                d = json.load(f)
+            return d if d.get('sessionId') else None
+        except OSError:
+            return None
+        except ValueError:  # caught mid-rewrite
+            if not last_try:
+                time.sleep(0.05)
+    return None
+
+
+def chat_path(sid):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', sid or ''):
+        return None
+    for folder in folders():
+        path = os.path.join(folder, sid + '.jsonl')
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def chat_stamp(path):
+    try:
+        st = os.stat(path)
+        return st.st_size, st.st_mtime
+    except OSError:
+        return None
+
+
+def ps_table():
+    """Every process: its number, its parent's, and how much of a processor it is using now. None if the
+    table cannot be read: the caller must then assume work is going on."""
+    try:
+        done = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,%cpu='], capture_output=True, text=True, timeout=5,
+                              env={'LC_ALL': 'C'})
+        return done.stdout if done.returncode == 0 and done.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def tree_load(table, root):
+    """Percent of a processor in use right now by everything the chat started (not by the chat itself)."""
+    kids, load = {}, {}
+    for line in table.splitlines():
+        f = line.split()
+        if len(f) != 3 or not (f[0].isdigit() and f[1].isdigit()):
+            continue
+        try:
+            load[int(f[0])] = float(f[2].replace(',', '.'))
+        except ValueError:
+            continue
+        kids.setdefault(int(f[1]), []).append(int(f[0]))
+    total, todo, seen = 0.0, list(kids.get(root, [])), set()
+    while todo:
+        pid = todo.pop()
+        if pid not in seen:
+            seen.add(pid)
+            total += load.get(pid, 0.0)
+            todo += kids.get(pid, [])
+    return total
+
+
+def room_elsewhere(account, want=None, avoid=()):
+    """The account with the most room that is not the one the chat is on, nor one it stopped on a little while
+    ago (`avoid`), or None. `want` keeps to his plan."""
+    accts = accounts()
+    with ThreadPoolExecutor(len(accts) or 1) as pool:
+        accts = list(pool.map(ping, accts))
+    for key in avoid:
+        accts = others(accts, key)
+    ok = [a for a in others(accts, account)
+          if 'five' in a and not a['blocked'] and room(a) >= MIN_ROOM and (not want or a.get('plan') == want)]
+    return max(ok, key=room) if ok else None
+
+
+def watch(pid, account, want, move, stop, stopped_on=None):
+    """Runs beside one chat until its window goes. When the chat has stopped at a usage limit, nothing of its
+    own is working and another account has room, it closes the chat and leaves in `move` where it should
+    reopen. Never closes a chat that is working, never without somewhere to take it, never raises.
+    `stopped_on` = {account: when this chat last stopped at a limit there}, kept by supervise()."""
+    sid = path = stamp = chat = quiet = None
+    retry_at = 0
+    opened = time.time()  # only a limit hit in THIS window counts: a chat just carried over still ends with the
+    #                       old limit message until its first answer lands, and that must not send it on again
+    while not stop.wait(WATCH_EVERY):
+        try:
+            if not running(pid):
+                return
+            live = window_of(pid)
+            if not live:
+                continue
+            if live['sessionId'] != sid:  # /clear or /resume inside the window: it shows another chat now
+                sid, path, stamp, chat = live['sessionId'], None, None, None
+            path = path or chat_path(sid)
+            if not path:
+                continue
+            seen = chat_stamp(path)
+            if seen != stamp or chat is None:
+                stamp, chat = seen, read_chat(path, any_kind=True, tail=WATCH_TAIL)
+            if not chat or not chat['limited'] or chat['when'] < opened:
+                quiet, retry_at = None, 0
+                continue
+            now = time.time()
+            if now - chat['when'] < GRACE or live.get('status') == 'busy':
+                continue
+            if live.get('status') == 'shell':  # it has a background command: a render is left to finish,
+                table = ps_table()  # a preview server or a waiting loop is not waited for
+                if table is None or tree_load(table, pid) > CPU_BUSY:
+                    quiet = None
+                    continue
+                quiet = quiet or now
+                if now - quiet < CPU_WINDOW:
+                    continue
+            if now < retry_at:
+                continue
+            avoid = {k for k, at in (stopped_on or {}).items() if time.time() - at < AVOID}
+            to = room_elsewhere(account, want, avoid)
+            if to is None:  # nowhere to take it: it stays exactly as it is; look again later
+                retry_at = time.time() + RETRY
+                continue
+            again, fresh = window_of(pid), read_chat(path, any_kind=True, tail=WATCH_TAIL)
+            if not (again and again['sessionId'] == sid and again.get('status') != 'busy' and fresh and fresh['limited']
+                    and fresh['when'] >= opened):
+                stamp = None  # it carried on by itself while the accounts were checked
+                continue
+            move['going'] = True  # supervise() waits for the rest of this once claude has ended
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:  # it had just gone by itself: nothing is reopened
+                move.clear()
+                return
+            move.update(id=sid, to=to, old=account)
+            return
+        except Exception:
+            continue  # a fault here must never take the chat down
+
+
+def terminal_state():
+    try:
+        return termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return None
+
+
+def tidy_terminal(saved):
+    """Put the terminal back as it was before claude, in case a chat closed by ccd left it half set up."""
+    try:
+        if saved:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, saved)
+        sys.stdout.write('\x1b[?25h\x1b[0m\r\n')
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def note_move(sid, old, new):
+    try:
+        os.makedirs(os.path.dirname(MOVES), exist_ok=True)
+        with open(MOVES, 'a') as f:
+            f.write('%s  chat %s  %s -> %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), sid, old, new))
+    except OSError:
+        pass
+
+
+def stopped(pid):
+    """Is this process stopped (Ctrl-Z) at this moment?"""
+    try:
+        return 'T' in subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True,
+                                     timeout=3).stdout
+    except Exception:
+        return False
+
+
+def wait_for(pid):
+    """Wait for claude to end -> the exit code a shell would report. If Ctrl-Z in the chat stops claude alone,
+    ccd stops itself too, so the shell sees its job stop and gives the prompt back; `fg` wakes both. Usually
+    Ctrl-Z stops both at once: the report of claude's stop is then read only after `fg`, when it is old news."""
+    while True:
+        try:
+            _, status = os.waitpid(pid, os.WUNTRACED)
+        except ChildProcessError:
+            return 0
+        if os.WIFSTOPPED(status):
+            if stopped(pid):
+                os.kill(os.getpid(), signal.SIGSTOP)
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except OSError:
+                    pass
+            continue
+        return 128 + os.WTERMSIG(status) if os.WIFSIGNALED(status) else os.WEXITSTATUS(status)
+
+
+def supervise(args, env, account, want):
+    """Start claude and stay behind it. When its chat stops at a usage limit and another account has room, the
+    chat is closed and the same chat reopened there, as often as it takes. Returns claude's exit code."""
+    saved = terminal_state()
+    names = dict({'main': 'your Claude Code login'}, **{key: label for key, label, _ in added()})
+    state = {'pid': None, 'closing': False}
+    stopped_on = {}  # account -> when this chat last stopped at a limit there
+
+    def pass_on(signum, _frame):  # the window is being closed, or ccd was told to end: claude ends, nothing reopens
+        state['closing'] = True
+        try:
+            os.kill(state['pid'], signum)
+        except (OSError, TypeError):
+            pass
+    for sig in (signal.SIGINT, signal.SIGQUIT):  # Ctrl-C belongs to the chat; ccd must outlive it
+        signal.signal(sig, lambda *_: None)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, pass_on)
+    words = FLAGS + args
+    env = dict(env, CCD_BEHIND=str(os.getpid()))  # lets `ccdr` see that a chat's window has ccd behind it
+    while True:
+        move, stop = {}, threading.Event()
+        child = subprocess.Popen([CLAUDE] + words, env=env, close_fds=False)  # same open files as before
+        state['pid'] = child.pid
+        if state['closing']:  # told to end in the moment between two chats: the new one ends too
+            pass_on(signal.SIGTERM, None)
+        watcher = threading.Thread(target=watch, args=(child.pid, account, want, move, stop, stopped_on), daemon=True)
+        watcher.start()
+        code = child.returncode = wait_for(child.pid)
+        stop.set()
+        if move.get('going'):  # it closed the chat and says where to straight after: let it finish saying.
+            watcher.join(5)    # (Not waited for otherwise: he quit, and the prompt must come back at once.)
+        to = move.get('to')
+        if not to or state['closing']:
+            return code
+        tidy_terminal(saved)
+        print('ccd: this chat reached its limit on %s. Carrying on, on %s (%s).'
+              % (names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
+        note_move(move['id'], account, to['key'])
+        stopped_on[account] = time.time()
+        said = '(ccd moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
+            names.get(account, account), to['label'], time.strftime('%H:%M'))  # claude clears the screen: say it in the chat
+        account, env = to['key'], dict(env)
+        env['CCD_ACCOUNT'] = account
+        if account == 'main':
+            env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)  # his keychain login
+        else:
+            env['CLAUDE_CODE_OAUTH_TOKEN'] = to['token']
+        # Nobody is there to answer claude's "summary or full?" question: the whole chat, always.
+        env['CLAUDE_CODE_RESUME_THRESHOLD_MINUTES'] = '100000000'
+        words = FLAGS + ['--resume', move['id'], said + NUDGE]
+
+
+class Menu:
+    """The ccdm screen, drawn on the terminal itself (/dev/tty) on its spare screen, so the shell looks
+    as it did once he has chosen. Raises OSError / termios.error when there is no terminal to ask in."""
+
+    def __init__(self, note='Checking your accounts…'):
+        self.fd = os.open('/dev/tty', os.O_RDWR)
+        self.old = termios.tcgetattr(self.fd)
+        try:
+            tty.setcbreak(self.fd)  # keys arrive one at a time, unechoed
+            mode = termios.tcgetattr(self.fd)
+            off = bytes([os.fpathconf(self.fd, 'PC_VDISABLE')])
+            for k in ('VSUSP', 'VDSUSP', 'VQUIT'):  # Ctrl-Z, Ctrl-Y, Ctrl-\ would end us with this screen left up
+                if hasattr(termios, k):
+                    mode[6][getattr(termios, k)] = off
+            termios.tcsetattr(self.fd, termios.TCSANOW, mode)
+            self.put('\x1b[?1049h\x1b[?25l')
+            self.show([[], [('  ✦  ', colour(STOPS[0])), (note, '2')]])
+        except BaseException:
+            self.close()
+            raise
+
+    def put(self, s):
+        os.write(self.fd, s.encode())
+
+    def show(self, lines):
+        cols = os.get_terminal_size(self.fd).columns
+        self.put('\x1b[H\x1b[J' + '\r\n'.join(paint(l, cols) for l in lines))
+
+    def close(self):
+        if self.fd is None:
+            return
+        self.put('\x1b[?25h\x1b[?1049l')
+        termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old)  # FLUSH: no stray key carries over into the chat
+        os.close(self.fd)
+        self.fd = None
+
+    def key(self, timeout=None):
+        if timeout is not None and not select.select([self.fd], [], [], timeout)[0]:
+            return None  # nothing pressed in that time
+        b = os.read(self.fd, 1)
+        if b in (b'\r', b'\n'):
+            return 'enter'
+        if b in (b'', b'\x04'):
+            return 'esc'
+        if b != b'\x1b':
+            return b.decode('latin-1')
+        seq = b''  # an arrow key is Esc + two or more bytes sent at once; Esc alone is followed by nothing
+        while select.select([self.fd], [], [], 0.05)[0]:
+            seq += os.read(self.fd, 1)
+            if len(seq) > 1 and 0x40 <= seq[-1] <= 0x7e:
+                break
+        if not seq:
+            return 'esc'
+        return {b'A': 'up', b'B': 'down'}.get(seq[-1:], '') if seq[:1] in (b'[', b'O') else ''
+
+    def choose(self, rws):
+        """The row he chose, or None if he backed out. Opens on the account with the most room."""
+        # Keys typed before the list was on screen are dropped: the rows and their numbers depend on which
+        # accounts answered, so a number typed blind could start an account he did not mean.
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        at = max((i for i, r in enumerate(rws) if not r['blocked']), key=lambda i: room(rws[i]))
+        while True:
+            size = os.get_terminal_size(self.fd)
+            self.show(frame(rws, at, size.columns, size.lines))
+            at, act = press(rws, at, self.key())
+            if act:
+                return rws[at] if act == 'go' else None
+
+    def choose_chat(self, chs):
+        """The chat he chose from the ccdr list, or None if he backed out. Opens on the first row: the chat
+        that stopped at its limit most recently, if any did."""
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        at = top = 0
+        while True:
+            size = os.get_terminal_size(self.fd)
+            n = shown(chs, size.lines)
+            top = scroll(len(chs), at, top, n)
+            self.show(chat_frame(chs, at, size.columns, size.lines, time.time(), top))
+            at, act = press_chat(len(chs), at, self.key(), top, n)
+            if act:
+                return chs[at] if act == 'go' else None
+
+    def wait(self, chat, still_open):
+        """The chat is open in another window: 'same' once that window closes, 'copy' if he presses c,
+        None if he backs out."""
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        while True:
+            self.show(wait_frame(chat, os.get_terminal_size(self.fd).columns))
+            act = waiting(self.key(0.5), still_open())
+            if act:
+                return None if act == 'quit' else act
+
+
+# ---- ccd add / accounts / remove / setup / uninstall ------------------------------------------------------------
+PLANS = [(200, '$200 a month', 'Max 20x'), (100, '$100 a month', 'Max 5x'), (20, '$20 a month', 'Pro'),
+         (None, 'Not sure, or another plan', '')]
+
+
+class Ask:
+    """Questions in the terminal itself, the way Claude Code asks them: one at a time, a ❯ list, then the answer
+    folded to one line. Keys come from /dev/tty, never stdin (under `curl … | bash` stdin is the script).
+    Raises OSError / termios.error when there is no terminal."""
+
+    def __init__(self):
+        self.fd = os.open('/dev/tty', os.O_RDWR)
+        try:
+            self.old = termios.tcgetattr(self.fd)
+        except BaseException:
+            os.close(self.fd)
+            raise
+
+    def put(self, s):
+        os.write(self.fd, s.encode())
+
+    def cols(self):
+        try:
+            return os.get_terminal_size(self.fd).columns
+        except OSError:
+            return 80
+
+    def say(self, lines):
+        self.put(''.join(paint(l, self.cols()) + '\r\n' for l in lines))
+
+    def key(self, timeout=None):
+        return Menu.key(self, timeout)
+
+    def _loop(self, draw, act):
+        """Redraw in place until act(key) returns (True, answer)."""
+        n = 0
+        termios.tcflush(self.fd, termios.TCIFLUSH)  # keys typed before the question showed are dropped
+        try:
+            tty.setcbreak(self.fd)
+            mode = termios.tcgetattr(self.fd)
+            off = bytes([os.fpathconf(self.fd, 'PC_VDISABLE')])
+            for k in ('VSUSP', 'VDSUSP', 'VQUIT'):  # they would stop or kill us with the terminal left half set
+                if hasattr(termios, k):
+                    mode[6][getattr(termios, k)] = off
+            termios.tcsetattr(self.fd, termios.TCSANOW, mode)
+            self.put('\x1b[?25l')
+            while True:
+                lines = draw()
+                self.put(('\x1b[%dA' % n if n else '') + '\r\x1b[J' + ''.join(paint(l, self.cols()) + '\r\n'
+                                                                             for l in lines))
+                n = len(lines)
+                done, answer = act(self.key())
+                if done:
+                    return answer
+        finally:
+            self.put(('\x1b[%dA' % n if n else '') + '\r\x1b[J\x1b[?25h')
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def choose(self, question, options, note=None, at=0):
+        """options: [(label, dim note)]. The index chosen, or None for Esc / Ctrl-C."""
+        teal, dim = colour(STOPS[0]), '2'
+        state = {'at': at}
+
+        def draw():
+            out = [[('  ' + question, '1')]] + ([[('  ' + note, dim)]] if note else []) + [[]]
+            for i, (label, sub) in enumerate(options):
+                on = i == state['at']
+                out.append([('  ❯ ' if on else '    ', teal + ';1'), ('%d. ' % (i + 1), teal if on else dim),
+                            (label, teal if on else ''), ('  · ' + sub if sub else '', dim)])
+            return out + [[], [('  Enter to confirm · Esc to skip', dim)]]
+
+        def act(k):
+            if k in ('up', 'k', 'down', 'j'):
+                state['at'] = (state['at'] + (-1 if k in ('up', 'k') else 1)) % len(options)
+            elif k == 'enter':
+                return True, state['at']
+            elif k in ('esc', 'q'):
+                return True, None
+            elif len(k) == 1 and k.isdigit() and 1 <= int(k) <= len(options):
+                return True, int(k) - 1
+            return False, None
+        try:
+            got = self._loop(draw, act)
+        except KeyboardInterrupt:
+            got = None
+        self.say([[('  ✓ ' if got is not None else '  · ', teal if got is not None else dim), (question, dim),
+                   ('  ' + options[got][0] if got is not None else '  skipped', '')]])
+        return got
+
+    def text(self, question, default='', secret=False, hint=None):
+        """A typed answer (Enter alone keeps the default), or None for Esc / Ctrl-C."""
+        teal, dim = colour(STOPS[0]), '2'
+        typed = bytearray()
+
+        def now():
+            return typed.decode('utf-8', 'ignore')
+
+        def draw():
+            t = now()
+            shown = ('•' * min(len(t), 24) + ('  %d characters' % len(t) if len(t) > 24 else '')) if secret else t
+            return ([[('  ' + question, '1')]] + ([[('  ' + hint, dim)]] if hint else []) + [[]]
+                    + [[('  ❯ ', teal + ';1'), (shown, '') if t else (default, dim), ('▌', teal)]]
+                    + [[], [('  Enter to confirm · Esc to cancel', dim)]])
+
+        def act(k):
+            if k == 'enter':
+                return True, now().strip() or default
+            if k == 'esc':
+                return True, None
+            if k in ('\x7f', '\x08'):
+                while typed and (typed.pop() & 0xC0) == 0x80:  # a whole letter, not half of one
+                    pass
+            elif k == '\x15':  # Ctrl-U: start again
+                typed.clear()
+            elif len(k) == 1 and (ord(k) >= 0x20) and len(typed) < 4096:
+                typed.extend(k.encode('latin-1'))
+            return False, None
+        try:
+            got = self._loop(draw, act)
+        except KeyboardInterrupt:
+            got = None
+        if got is None:
+            self.say([[('  · ', dim), (question, dim), ('  cancelled', '')]])
+        else:
+            self.say([[('  ✓ ', teal), (question, dim), ('  ' + ('•' * 8 if secret else got), '')]])
+        return got
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def tokens_in(text):
+    """Every way the token can be read out of what `claude setup-token` printed, most likely first. The screen can
+    wrap a long token over two or three lines, so a token that runs to the end of its line is also tried joined
+    with the lines after it that are nothing but token letters."""
+    text = re.sub(r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78]',
+                  '', text)
+    lines = [l.strip() for l in re.split(r'\r?\n|\r', text)]
+    out = []
+    for i, line in enumerate(lines):
+        for m in TOKEN_RE.finditer(line):
+            joined = m.group(0)
+            if m.end() == len(line):
+                for nxt in lines[i + 1:i + 4]:
+                    if not re.fullmatch(r'[A-Za-z0-9_-]+', nxt):
+                        break
+                    joined += nxt
+                    out.append(joined)
+            out.append(m.group(0))
+    seen, best = set(), []
+    for t in sorted(out, key=len, reverse=True):  # the longest reading first: a cut token is the shorter one
+        if t not in seen:
+            seen.add(t)
+            best.append(t)
+    return best[:4]
+
+
+def setup_token(cols):
+    """Run `claude setup-token` in this terminal (the person signs in in the browser), watching what it prints.
+    Returns every reading of the token it showed; [] if none was seen.
+    Not pty.spawn: on macOS it waits for an end-of-output the Mac never sends, and froze after the sign-in."""
+    import fcntl, pty, struct
+    seen = bytearray()
+    try:
+        me = os.open('/dev/tty', os.O_RDWR)
+    except OSError:
+        return []
+    old = termios.tcgetattr(me)
+    try:
+        rows, width = struct.unpack('HHHH', fcntl.ioctl(me, termios.TIOCGWINSZ, b'\0' * 8))[:2]
+    except OSError:
+        rows, width = 40, cols
+    env = dict(os.environ)
+    env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)  # the sign-in must not run as another account
+    pid, fd = pty.fork()
+    if pid == 0:  # the child: claude, in a terminal of the same size as this one
+        try:
+            os.execve(CLAUDE, [CLAUDE, 'setup-token'], env)
+        finally:
+            os._exit(127)
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows or 40, width or cols, 0, 0))
+    except OSError:
+        pass
+    done = False
+    try:
+        tty.setraw(me)  # every key, Ctrl-C included, goes to claude as typed
+        while True:
+            ready = select.select([fd, me], [], [], 0.2)[0]
+            if fd in ready:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    data = b''
+                if not data:
+                    break
+                os.write(me, data)
+                if len(seen) < 1 << 20:
+                    seen.extend(data)
+            if me in ready:
+                os.write(fd, os.read(me, 1024))
+            if not done and os.waitpid(pid, os.WNOHANG)[0]:
+                done = True  # it has ended: take what is left to read, then stop
+                while select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        data = os.read(fd, 4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    os.write(me, data)
+                    seen.extend(data[:max(0, (1 << 20) - len(seen))])
+                break
+    finally:
+        termios.tcsetattr(me, termios.TCSAFLUSH, old)
+        os.close(me)
+        os.close(fd)
+        if not done:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+    return tokens_in(seen.decode('utf-8', 'ignore'))
+
+
+def slug(label, taken):
+    base = re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')[:24].strip('-') or 'account'
+    base = 'account' if base == 'main' else base
+    key, n = base, 2
+    while key in taken:
+        key, n = '%s-%d' % (base, n), n + 1
+    return key
+
+
+def same_account(a, b):
+    """Two answers from the same account: same organisation and the same figures (a team shares an organisation,
+    but each person in it has their own limits)."""
+    return bool('five' in a and 'five' in b and a.get('org') and a.get('org') == b.get('org')
+                and abs(a['five'] - b['five']) < 0.02 and abs(a['week'] - b['week']) < 0.02)
+
+
+def figures(a):
+    return '5-hour %d%% used · weekly %d%% used' % (round(a['five'] * 100), round(a['week'] * 100))
+
+
+def keep(token, label, plan):
+    """Test the token, then keep it. Returns (account, None) or (None, why not)."""
+    got = ping({'key': 'new', 'label': label, 'token': token})
+    if 'five' not in got:
+        return None, got.get('error') or 'no answer'
+    for key, old_label, _ in added():
+        t = token_get(key)
+        if t == token:
+            return None, 'already added, as %s' % old_label
+        if t and same_account(got, ping({'key': key, 'label': old_label, 'token': t})):
+            return None, 'that is the same account as %s' % old_label
+    d = settings()
+    labels = {l.lower() for _, l, _ in added()}
+    base, n = label, 2
+    while label.lower() in labels:
+        label, n = '%s %d' % (base, n), n + 1
+    key = slug(label, {k for k, _, _ in added()} | {'main'})
+    token_put(key, token)
+    d['accounts'] = [a for a in d.get('accounts') or [] if isinstance(a, dict) and a.get('key') != key] + [
+        {'key': key, 'label': label, 'plan': plan}]
+    save_settings(d)
+    got.update(key=key, label=label, plan=plan)
+    return got, None
+
+
+def cmd_add(args):
+    """`ccd add [name]`: add another of your Claude accounts."""
+    plan = None
+    words = []
+    for w in args:
+        if w in ('100', '200', '20'):
+            plan = int(w)
+        else:
+            words.append(w)
+    name = ' '.join(words).strip()
+    if not sys.stdin.isatty():  # a script or an agent: the token comes on stdin, never as a word
+        token = sys.stdin.read().strip()
+        if not TOKEN_RE.fullmatch(token):
+            sys.exit('ccd add: give the token on stdin (it starts with sk-ant-oat01-), e.g. ccd add Work 200 < file')
+        try:
+            got, why = keep(token, name or 'Account %d' % (len(added()) + 2), plan)
+        except subprocess.TimeoutExpired:
+            got, why = None, "the Keychain didn't answer (is it locked?)"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            got, why = None, "couldn't save it in the Keychain"
+        if not got:
+            sys.exit('ccd add: nothing added: %s' % why)
+        print('ccd: added %s (%s)' % (got['label'], figures(got)))
+        return 0
+    try:
+        ask = Ask()
+    except (OSError, termios.error):
+        sys.exit('ccd add: no terminal to ask in. Pipe the token in instead: ccd add Work 200 < file')
+    try:
+        return add_here(ask, name, plan)
+    except KeyboardInterrupt:
+        ask.say([[]])
+        return 130
+    finally:
+        ask.close()
+
+
+def add_here(ask, name='', plan=None):
+    teal, dim, warm = colour(STOPS[0]), '2', colour((251, 191, 36))
+    ask.say([[], [('  ✦  ', teal), ('Add a Claude account', '1')],
+             [('     A page opens in your browser. Sign in there with the account you', dim)],
+             [('     want to add. Showing a different one? Sign out of claude.ai first,', dim)],
+             [('     or open the link it prints in a private window.', dim)], []])
+    how = ask.choose('How do you want to add it?', [('Sign in in the browser', 'runs claude setup-token'),
+                                                     ('Paste a token I already have', 'from claude setup-token')])
+    if how is None:
+        return 130
+    tries = []
+    if how == 0:
+        if not os.access(CLAUDE, os.X_OK):
+            ask.say([[('  ✗ ', warm), ('Claude Code is not installed: https://claude.com/claude-code', '')]])
+            return 1
+        tries = setup_token(ask.cols())
+        ask.say([[]])
+        if not tries:
+            ask.say([[('  · ', dim), ("Couldn't read the token off the screen. Copy it from above.", dim)]])
+    if not tries:
+        t = ask.text('Paste the token', secret=True, hint='It starts with sk-ant-oat01-')
+        if t is None:
+            return 130
+        t = re.sub(r'\s+', '', t)
+        if not TOKEN_RE.fullmatch(t):
+            ask.say([[('  ✗ ', warm), ("That isn't a Claude Code token (those start with sk-ant-oat01-).", '')],
+                     [('    Nothing added.', dim)]])
+            return 1
+        tries = [t]
+    ask.say([[('  ✦  ', teal), ('Checking the account…', dim)]])
+    found = None
+    for t in tries:  # the screen may have cut the token: the first reading that answers is the token
+        got = ping({'key': 'new', 'label': '', 'token': t})
+        if 'five' in got:
+            found = t
+            break
+    if not found and how == 0 and 'error' in got and 'internet' not in got['error']:
+        ask.say([[('  · ', dim), ("The token read off the screen didn't work. Copy it from above instead.", dim)]])
+        t = ask.text('Paste the token', secret=True, hint='It starts with sk-ant-oat01-')
+        if t is None:
+            return 130
+        t = re.sub(r'\s+', '', t)
+        got = ping({'key': 'new', 'label': '', 'token': t}) if TOKEN_RE.fullmatch(t) else {'error': 'not a token'}
+        found = t if 'five' in got else None
+    if not found:
+        ask.say([[('  ✗ ', warm), ("That token didn't work: %s." % (got.get('error') or 'no answer'), '')],
+                 [('    Nothing added.', dim)]])
+        return 1
+    if not name:
+        name = ask.text('What should ccd call this account?', default='Account %d' % (len(added()) + 2),
+                        hint='Whose it is works best, e.g. "Work" or "Personal"')
+        if name is None:
+            return 130
+    if plan is None:
+        p = ask.choose('Which plan is it on?', [(label, note) for _, label, note in PLANS],
+                       note='ccd 200 then starts only on $200 accounts; it changes nothing else')
+        plan = PLANS[p][0] if p is not None else None
+    try:
+        got, why = keep(found, name, plan)
+    except subprocess.TimeoutExpired:
+        got, why = None, "the Keychain didn't answer (is it locked?)"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        got, why = None, "couldn't save it in the Keychain"
+    if not got:
+        ask.say([[('  ✗ ', warm), ('Nothing added: %s.' % why, '')]])
+        return 1
+    ask.say([[], [('  ✓ ', teal), ('Added ', ''), (got['label'], '1'), ('   ' + figures(got), dim)], []])
+    return 0
+
+
+def usage_lines(accts, cols):
+    teal, dim, warm = colour(STOPS[0]), '2', colour((251, 191, 36))
+    width = max(10, min(28, cols - 44))
+    out = [[], [('  ✦  ', teal), ('Your Claude accounts', '1')], []]
+    rws = rows(accts)
+    best = max((i for i, r in enumerate(rws) if not r['blocked']), key=lambda i: room(rws[i]), default=None)
+    for i, r in enumerate(rws):
+        note = [('   at its limit', dim)] if r['blocked'] else [('   most room', teal)] if i == best and len(rws) > 1 else []
+        if r.get('unchecked'):
+            out += [[('    ', ''), (r['label'], '1')], [('       not checked: it signs in again as a chat starts on it', dim)], []]
+            continue
+        out.append([('    ', ''), (r['label'], '1')] + note)
+        for name, used, reset in (('5-hour', r['five'], r.get('five_reset')), ('weekly', r['week'], r.get('week_reset'))):
+            out.append([('       %s  ' % name, dim)] + bar(used, width)
+                       + [(' %3d%%' % round(used * 100), colour(heat(max(used, 0.01))) + ';1'),
+                          ('  ·  ' + until(reset) if reset else '', dim)])
+        out.append([])
+    for a in accts:
+        if 'five' not in a:
+            out += [[('    ', ''), (a['label'], '1')], [('       ' + (a.get('error') or 'no answer'), warm)], []]
+    if not accts:
+        out += [[('    No account yet. Run claude once and sign in, then ccd add for your other ones.', dim)], []]
+    elif len(accts) == 1:
+        out += [[('    Only one account. Add another with ', dim), ('ccd add', colour(STOPS[1]))], []]
+    out.append([('  ccd add  ·  ccd remove <name>  ·  ccdm to choose one and start', dim)])
+    return out
+
+
+def cmd_accounts(args):
+    """`ccd accounts`: every account with its 5-hour and weekly limits."""
+    global PLAIN
+    if not sys.stdout.isatty():
+        PLAIN = True
+    accts = accounts()
+    if accts:
+        with ThreadPoolExecutor(len(accts)) as pool:
+            accts = list(pool.map(ping, accts))
+    cols = shutil.get_terminal_size((80, 24)).columns
+    print('\n'.join(paint(l, cols) for l in usage_lines(accts, cols)))
+    return 0
+
+
+def cmd_remove(args):
+    """`ccd remove <name>`: forget an account added with `ccd add` (its token leaves the Keychain)."""
+    name = ' '.join(args).strip()
+    mine = added()
+    hit = [a for a in mine if name and (a[0] == name or a[1].lower() == name.lower())]
+    if name.lower() in ('main', 'your claude code login') or name.lower().startswith('your claude code login'):
+        sys.exit("ccd: that is Claude Code's own login. To sign out of it, run /logout inside claude.")
+    if not hit:  # never a near match
+        sys.exit('ccd: no account called "%s". Yours: %s' % (name, ', '.join(l for _, l, _ in mine) or 'none added yet'))
+    key, label, _ = hit[0]
+    token_del(key)
+    d = settings()
+    d['accounts'] = [a for a in d.get('accounts') or [] if not (isinstance(a, dict) and a.get('key') == key)]
+    save_settings(d)
+    print('ccd: removed %s' % label)
+    return 0
+
+
+def welcome(cols):
+    teal, sky, dim = colour(STOPS[0]), colour(STOPS[1]), '2'
+    rule = [('  ' + '┄' * min(cols - 4, 58), dim)]
+    picture = [('  ', '')] + bar(0.62, min(cols - 4, 58)) if cols > 30 else []
+    return [[], [('  ✦ ', teal), ('ccd', teal + ';1'), ('  v' + VERSION, dim)], rule, [],
+            picture, [], [('  Start Claude Code on whichever of your accounts has room.', '')],
+            [('  When a chat hits its limit, ccd carries it on, on another account, by itself.', dim)],
+            [('  Chats start with permission prompts off.', dim)], [], rule, []]
+
+
+def how_to(cols):
+    sky, dim = colour(STOPS[1]), '2'
+    return [[('  ', ''), ('ccd', sky + ';1'), ('            start a chat on the account with the most room', dim)],
+            [('  ', ''), ('ccdm', sky + ';1'), ('           choose the account first  (m = manual)', dim)],
+            [('  ', ''), ('ccdr', sky + ';1'), ('           reopen a chat on another account  (r = resume)', dim)],
+            [('  ', ''), ('ccd accounts', sky + ';1'), ('   every account and how much is left', dim)],
+            [('  ', ''), ('ccd add', sky + ';1'), ('        add another account', dim)], []]
+
+
+def cmd_setup(args):
+    """The first run: say what ccd does, find the Claude Code login, offer to add accounts."""
+    global PLAIN
+    try:
+        ask = Ask()
+    except (OSError, termios.error):
+        PLAIN = True  # an agent or a script installed it: plain lines, no questions
+        print('\n'.join(paint(l, 100) for l in [[('ccd %s is installed.' % VERSION, '')], []] + how_to(100)
+                        + [[('Add your other Claude accounts with: ccd add (it needs a terminal and a browser sign-in)', '')]]))
+        return 0
+    try:
+        teal, dim, warm = colour(STOPS[0]), '2', colour((251, 191, 36))
+        cols = ask.cols()
+        ask.say(welcome(cols))
+        me = login()
+        has = os.access(CLAUDE, os.X_OK)
+        ask.say([[('  ✓ ' if has else '  ✗ ', teal if has else warm),
+                  ('Claude Code found' if has else 'Claude Code is not installed yet: https://claude.com/claude-code', '')],
+                 [('  ✓ ' if me else '  · ', teal if me else dim),
+                  (me['label'] if me else 'Not signed in to Claude Code yet: run claude once and sign in', '')]]
+                + [[('  ✓ ', teal), (label, '')] for _, label, _ in added()] + [[]])
+        first = True
+        while True:
+            q = 'Add another Claude account now?' if first else 'Add one more?'
+            a = ask.choose(q, [('Add one', 'you sign in to it in the browser'), ('Not now', 'ccd add, any time')],
+                           at=0 if first else 1)
+            first = False
+            if a != 0:
+                break
+            ask.say([[]])
+            try:
+                add_here(ask)
+            except KeyboardInterrupt:
+                ask.say([[]])
+        ask.say([[], [('  ✦ ', teal), ('ccd', teal + ';1'), ('  v%s is ready' % VERSION, dim)], []] + how_to(cols))
+        return 0
+    finally:
+        ask.close()
+
+
+def cmd_uninstall(args):
+    """`ccd uninstall`: remove ccd, its settings and the tokens it kept. Chats and Claude Code are left alone."""
+    mine = added()
+    if '--yes' not in args:
+        try:
+            ask = Ask()
+        except (OSError, termios.error):
+            sys.exit('ccd uninstall: no terminal to ask in. Run ccd uninstall --yes to go ahead.')
+        try:
+            a = ask.choose('Remove ccd?', [('Remove it', 'and forget %d added account%s' % (len(mine), '' if len(mine) == 1 else 's')),
+                                           ('Keep it', '')], note='Your chats and your Claude Code login stay as they are.', at=1)
+        finally:
+            ask.close()
+        if a != 0:
+            return 130
+    for key, _, _ in mine:
+        token_del(key)
+    if not file_store():  # and any left behind by a settings file that was lost or edited
+        for _ in range(100):
+            try:
+                if subprocess.run([SECURITY, 'delete-generic-password', '-s', SERVICE, '-l', 'ccd account'] + keychain(),
+                                  capture_output=True, timeout=5).returncode:
+                    break
+            except subprocess.SubprocessError:
+                break
+    for name in ('config.json', 'tokens.json', 'moves.log', 'config.json.tmp', 'tokens.json.tmp'):
+        try:
+            os.unlink(os.path.join(HOME, name))
+        except OSError:
+            pass
+    try:
+        os.rmdir(HOME)  # only if nothing else is in it
+    except OSError:
+        pass
+    me = os.path.realpath(sys.argv[0])
+    for d in os.environ.get('PATH', '').split(':') + [os.path.expanduser('~/.local/bin')]:
+        for n in ('ccd', 'ccdm', 'ccdr'):
+            p = os.path.join(d, n)
+            if os.path.islink(p) and os.path.realpath(p) == me:
+                os.unlink(p)
+    share = os.path.expanduser('~/.local/share/ccd')
+    if os.path.dirname(me) == os.path.realpath(share):
+        shutil.rmtree(share, ignore_errors=True)
+    print('ccd: removed. Your chats and your Claude Code login are untouched.')
+    return 0
+
+
+def cmd_help(args):
+    print(__doc__.split('\n\n', 1)[0] + '\n\n' + __doc__.split('\n\n')[1] + '\n\nAny other words go to claude as they are.')
+    return 0
+
+
+REPO = 'udayanwalvekar/ccd'
+LATEST = 'https://raw.githubusercontent.com/%s/main/ccd.sh' % REPO
+
+
+def cmd_update(args):
+    """`ccd update`: fetch the newest ccd.sh and run it over this one. Accounts and settings stay as they are."""
+    import tempfile
+    print('ccd: checking for a newer ccd…', file=sys.stderr)
+    try:
+        body = urllib.request.urlopen(LATEST + '?v=%d' % time.time(), timeout=20).read()
+    except Exception as e:
+        sys.exit("ccd update: couldn't reach GitHub (%s). Nothing changed." % (getattr(e, 'reason', None) or e))
+    found = re.search(rb"^VERSION = '([0-9.]+)'$", body, re.M)
+    if not (body.startswith(b'#!/usr/bin/env bash') and b'CCD_PROGRAM_END' in body and found):
+        sys.exit("ccd update: what came back doesn't look like ccd. Nothing changed.")
+    new = found.group(1).decode()
+    number = lambda v: tuple(int(x) for x in v.split('.') if x.isdigit())
+    if number(new) <= number(VERSION) and '--force' not in args:
+        print('ccd: you have the newest, %s' % VERSION)
+        return 0
+    with tempfile.NamedTemporaryFile('wb', suffix='.sh', delete=False) as f:
+        f.write(body)
+    try:
+        code = subprocess.run(['/bin/bash', f.name], env=dict(os.environ, CCD_NO_SETUP='1'),
+                              stdout=subprocess.DEVNULL).returncode
+    finally:
+        os.unlink(f.name)
+    if code:
+        sys.exit('ccd update: the update did not finish. The ccd you had still works.')
+    print('ccd: updated %s → %s' % (VERSION, new))
+    return 0
+
+
+def cmd_version(args):
+    print('ccd ' + VERSION)
+    return 0
+
+
+COMMANDS = {'add': cmd_add, 'accounts': cmd_accounts, 'usage': cmd_accounts, 'remove': cmd_remove,
+            'setup': cmd_setup, 'uninstall': cmd_uninstall, 'help': cmd_help, '--help': cmd_help, '-h': cmd_help,
+            'version': cmd_version, '--version': cmd_version, 'update': cmd_update}
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] and args[0] in COMMANDS:
+        sys.exit(COMMANDS[args[0]](args[1:]) or 0)
+    called = os.path.basename(sys.argv[0]) if sys.argv else ''
+    if called == 'ccdm':  # the same program under its other names
+        args = ['--pick'] + args
+    elif called == 'ccdr':
+        args = ['--pick', '--carry'] + args
+    manual = carry = False
+    while args[:1] in (['--pick'], ['--carry']):  # in either order
+        if args.pop(0) == '--pick':
+            manual = True  # the ccdm alias: he chooses the account himself
+        else:
+            carry = True  # the ccdr alias: reopen one of his chats on another account
+    plan = lambda: int(args.pop(0)) if args and args[0] in ('100', '200') else None  # `ccd 200` = $200 plans only
+    want = plan()
+    chat = None
+    if carry:
+        given = args.pop(0) if args and not args[0].startswith('-') else None  # `ccdr <chat id>` skips the list
+        want = want or plan()  # `ccdr <id> 200` as well as `ccdr 200 <id>`
+    own_words = bool(args)  # anything left is his own for claude (a model, a settings file, a first message…)
+    if carry:
+        chat = carry_chat(given)
+    accts = accounts()
+    if want:
+        accts = [a for a in accts if a.get('plan') == want]
+        if not accts:
+            sys.exit('ccd: no $%d account is set up on this Mac (ccd add, then choose that plan)' % want)
+    menu = pick = None
+    if manual:
+        try:
+            menu = Menu()
+        except (OSError, termios.error):
+            print('ccdm: no terminal to ask in; picking the account with the most room', file=sys.stderr)
+    checking = True
+    try:
+        pool = ThreadPoolExecutor(len(accts) or 1)
+        try:
+            accts = list(pool.map(ping, accts))
+        finally:
+            pool.shutdown(wait=not menu, cancel_futures=True)  # with the list up, Ctrl-C must not wait for slow checks
+        checking = False
+        ok = [a for a in accts if 'five' in a and not a['blocked']]
+        if carry:
+            ok = elsewhere(ok, accts, chat)
+        if menu and ok:
+            pick = menu.choose(rows(accts))
+            if pick is None:
+                sys.exit(130)  # he backed out: start nothing
+    except KeyboardInterrupt:
+        if not menu:
+            raise
+        if checking:  # checks still on the network would hold a normal exit until they time out
+            menu.close()
+            os._exit(130)
+        sys.exit(130)
+    finally:
+        if menu:
+            menu.close()
+    if (menu or carry) and not ok:  # nothing to choose, or no account to carry the chat to: say why, start nothing
+        who = 'ccdr' if carry else 'ccdm'
+        full = rows(accts)
+        if not accts:
+            sys.exit('%s: no account yet. Run claude once and sign in (ccd add for your other accounts). '
+                     'Nothing started.' % who)
+        if not full:
+            sys.exit('%s: could not reach any account (is the internet on?). Nothing started.' % who)
+        print('%s: every %saccount is at its limit. Nothing started.' % (who, '$%d ' % want if want else ''), file=sys.stderr)
+        for a in full:
+            back = until(a.get('week_reset') if a['week'] >= a['five'] else a.get('five_reset'))
+            print('  %s%s' % (a['label'], ': ' + back if back else ''), file=sys.stderr)
+        if len(accts) == 1:
+            print('Add another account with: ccd add', file=sys.stderr)
+        sys.exit(1)
+    if carry:  # only now, with an account that has room: he is never asked to close a window for nothing
+        args = carry_words(chat, args)
+    env = dict(os.environ)
+    if not ok and want:
+        sys.exit('ccd: no $%d account has room right now (checked: %s)' % (want, ', '.join(a['label'] for a in accts)))
+    if not ok:
+        if accts:  # (with no account at all there is nothing to say: claude asks them to sign in)
+            print('ccd: could not check any account; starting with your usual login', file=sys.stderr)
+    else:
+        if pick is None:
+            best = max(room(a) for a in ok)
+            pick = random.choice([a for a in ok if room(a) >= best - 0.02])  # near-ties: random
+        env['CCD_ACCOUNT'] = pick['key']  # lets /usage mark the right account as in use
+        if pick['key'] == 'main':
+            env.pop('CLAUDE_CODE_OAUTH_TOKEN', None)  # fall back to the keychain login
+        else:
+            env['CLAUDE_CODE_OAUTH_TOKEN'] = pick['token']
+        print('ccd: using %s (%s)' % (pick['label'], how_full(pick)), file=sys.stderr)
+    if os.environ.get('CCD_DRY_RUN'):
+        print('ccd: dry run, token source = %s' % ('your Claude Code login' if 'CLAUDE_CODE_OAUTH_TOKEN' not in env else 'an added account'),
+              file=sys.stderr)
+        if carry:
+            print('ccd: dry run, would start: claude %s%s' % (' '.join(FLAGS + [a for a in args if a != NUDGE]),
+                                                                ' + the carry-on note' if NUDGE in args else ''),
+                  file=sys.stderr)
+        return
+    # Stay behind the chat, to carry it over if it stops at a limit. Not for a chat started with its own words
+    # for claude (a bot or script that starts claude with its own tools and safety settings): reopening only knows
+    # the chat, not those words, so such a chat is started the plain way and left alone.
+    if auto_on() and not own_words:
+        sys.exit(supervise(args, env, env.get('CCD_ACCOUNT', 'main'), want))
+    os.execve(CLAUDE, [CLAUDE] + FLAGS + args, env)
+
+
+if __name__ == '__main__':
+    main()
+CCD_PROGRAM_END
+} > "${SHARE}/ccd.new"
+"$PY" -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "${SHARE}/ccd.new" 2>/dev/null \
+  || { rm -f "${SHARE}/ccd.new"; fail "this file is damaged (cut short?); get a fresh copy of ccd.sh"; }
+chmod 755 "${SHARE}/ccd.new"
+"${SHARE}/ccd.new" --version >/dev/null 2>&1 </dev/null \
+  || { rm -f "${SHARE}/ccd.new"; fail "ccd didn't start with ${PY}; nothing was changed"; }
+mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
+
+# A folder already on PATH, so ccd works in this terminal straight away.
+BIN=""
+for d in "${HOME}/.local/bin" /opt/homebrew/bin /usr/local/bin "${HOME}/bin"; do
+  case ":${PATH}:" in
+    *":${d}:"*) if [ -d "$d" ] && [ -w "$d" ]; then BIN="$d"; break; fi ;;
+  esac
+done
+NEW_TAB=""
+if [ -z "$BIN" ]; then  # none: ~/.local/bin, and a PATH line for it unless their settings have one
+  BIN="${HOME}/.local/bin"
+  mkdir -p "$BIN"
+  RC="${HOME}/.zshrc"
+  case "${SHELL:-}" in */bash) RC="${HOME}/.bash_profile" ;; esac
+  if ! grep -Eqs '^[^#]*PATH=.*\.local/bin' "$RC"; then
+    printf '\n# ccd\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC"
+  fi
+  NEW_TAB=1
+fi
+
+BLOCKED=""
+for n in ccd ccdm ccdr; do
+  t="${BIN}/${n}"
+  if [ -e "$t" ] || [ -L "$t" ]; then
+    if [ ! -L "$t" ] || [ "$(readlink "$t")" != "${SHARE}/ccd" ]; then
+      note "ccd install: ${t} is another program, so it was left alone: typing ${n} won't reach ccd."
+      BLOCKED="${BLOCKED} ${n}"
+      continue
+    fi
+  fi
+  ln -sfn "${SHARE}/ccd" "$t"
+done
+
+# Their own alias or function called ccd would win over the program.
+for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.zprofile"; do
+  if grep -Eqs '^[[:space:]]*(alias[[:space:]]+(ccd|ccdm|ccdr)=|(function[[:space:]]+)?(ccd|ccdm|ccdr)[[:space:]]*\(\))' "$rc"; then
+    note "ccd install: ${rc/#$HOME/~} has its own ccd, ccdm or ccdr alias, which wins over this one. Remove it to use ccd."
+  fi
+done
+
+# The welcome and the offer to add accounts (not on an update). Keys come from the terminal, never from this
+# script's input. Always our own copy: a ccd of someone else's may sit in that folder.
+if [ -z "${CCD_NO_SETUP:-}" ]; then
+  if { : </dev/tty; } 2>/dev/null; then
+    "${SHARE}/ccd" setup </dev/tty || stty sane </dev/tty 2>/dev/null || true
+  else
+    "${SHARE}/ccd" setup </dev/null || true
+  fi
+fi
+if [ -n "$BLOCKED" ]; then
+  note "To use ccd anyway, run it by its full path: ${SHARE}/ccd"
+fi
+if [ -n "$NEW_TAB" ]; then
+  note "Open a new terminal tab for ccd to be found."
+fi

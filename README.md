@@ -12,7 +12,7 @@ That's the whole install. You can also download [`ccd.sh`](ccd.sh) and run `bash
 
 **Needs:** a Mac, [Claude Code](https://claude.com/claude-code), and Python 3.9 or newer (it comes with Apple's Command Line Tools: `xcode-select --install`).
 
-The installer puts the program in `~/.local/share/ccd`, puts `ccd`, `ccdm` and `ccdr` in a folder already on your PATH, and opens a short welcome that offers to add your other accounts. It changes nothing else.
+The installer puts the program in `~/.local/share/ccd`, puts `ccd`, `ccdm` and `ccdr` in a folder already on your PATH, and opens a short welcome that offers to add your other accounts. It changes nothing else. (Only if no suitable folder is on your PATH does it add `~/.local/bin` to it, in `~/.zshrc`.)
 
 ## Commands
 
@@ -62,8 +62,8 @@ ccd is for switching between Claude accounts **you** own. Anthropic's [Consumer 
 
 ## Privacy
 
-- Tokens are kept in the macOS Keychain (service `ccd`). A token only ever goes into the environment of the one chat using it, and ccd never prints one.
-- Your Claude Code login is read from the Keychain, never changed or refreshed.
+- Tokens are kept in the macOS Keychain (service `ccd`). A token goes only into the environment of the chat that uses it (and so of the commands that chat runs). ccd never prints one, but `claude setup-token` shows it on screen once while you add an account, as it always does.
+- Your Claude Code login is read from the Keychain, never changed or refreshed. Once it has been unused long enough to expire, ccd can't check its limits; it shows as "not checked", and starting a chat on it lets Claude Code renew it.
 - ccd talks only to `api.anthropic.com`, plus GitHub when you run `ccd update`.
 
 ## Good to know
