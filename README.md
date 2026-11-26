@@ -39,20 +39,22 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 
 ## Codex too: cxd
 
-`cxd` is ccd for Codex. It starts every chat in dangerously mode (`--dangerously-bypass-approvals-and-sandbox`) on whichever of your Codex accounts has the most usage left.
+`cxd` is ccd for Codex, and works the same way. It starts every chat in dangerously mode (`--dangerously-bypass-approvals-and-sandbox`) on whichever of your Codex accounts has the most usage left, and when a chat hits its limit, it moves it to another account by itself.
 
 | Type | What it does |
 |---|---|
 | `cxd` | Starts Codex on the account with the most usage left. |
 | `cxdm` | Shows your Codex accounts and how much is left on each. You pick one. |
-| `cxdr` | Shows your recent Codex chats. You pick one, and it carries on on another account. `cxdr <id>` skips the list. |
+| `cxdr` | Shows your recent Codex chats. You pick a chat, then an account, and it carries on there. |
+| `cxd 200` | Only uses your $200 accounts. `cxd 100` only your $100 ones. Works with `cxdm` and `cxdr` too. |
 | `cxd accounts` | Shows how much is left on every Codex account. |
-| `cxd add <name>` | Adds another Codex account. Codex opens its sign-in page in your browser. |
+| `cxd add` | Adds another Codex account. You sign in to it in your browser. |
 | `cxd remove <name>` | Forgets an account. Its folder and chats stay. |
+| `CCD_AUTO=0 cxd` | Starts a chat that won't move by itself. |
 
-Codex keeps each login in its own folder, so every account you add gets one: `~/.codex-<name>`. That folder links `config.toml`, `AGENTS.md`, `rules` and `skills` to your usual `~/.codex`, so every account works the same. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it as it is.
+Codex keeps each login in a folder of its own, so every account you add gets one: `~/.codex-<name>`. It links `config.toml`, `AGENTS.md`, `rules` and `skills` to your usual `~/.codex`, so every account works the same. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it as it is.
 
-ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. `cxdr` copies the chat into the new account's folder and reopens it there. A Codex chat doesn't move by itself yet when it hits its limit: run `cxdr` and it's on top of the list.
+ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. A move copies the chat into the new account's folder and reopens it there, and Codex sends the carry-on note by itself. The move works like ccd's: it waits 20 seconds, waits for a command that's still working, and checks again every 5 minutes if no account has room.
 
 Want Codex's own approvals back? Add `"codex_args": []` to `~/.config/ccd/config.json`. Your own `--sandbox`, `--ask-for-approval` or `--full-auto` also replaces the default for that chat.
 

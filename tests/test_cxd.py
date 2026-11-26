@@ -250,9 +250,15 @@ class Carry(Folders):
         chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
         here = os.getcwd()
         self.addCleanup(os.chdir, here)
-        with mock.patch.object(ccd, 'codex_open_files', return_value=set()), redirect_stderr(io.StringIO()):
+        with mock.patch.object(ccd, 'codex_open_files', return_value=set()), \
+                mock.patch.object(ccd, 'codex_queue', return_value=True) as q, redirect_stderr(io.StringIO()):
             words = ccd.codex_carry_words(chat, d, [])
-        self.assertEqual(words, ['resume', A, ccd.NUDGE])
+        self.assertEqual(words, ['resume', A])  # the note is queued: codex sends it as the chat reopens
+        q.assert_called_once_with(d, A, ccd.NUDGE)
+        with mock.patch.object(ccd, 'codex_open_files', return_value=set()), \
+                mock.patch.object(ccd, 'codex_queue', return_value=False), redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(ccd.codex_carry_words(chat, d, []), ['resume', A, ccd.NUDGE])
+        self.assertIn('press Enter', err.getvalue())
         self.assertTrue(os.path.isfile(os.path.join(d, os.path.relpath(src, self.main))))
         self.assertEqual(os.path.realpath(os.getcwd()), os.path.realpath(self.root))
 
@@ -306,6 +312,21 @@ class Carry(Folders):
         self.assertEqual(call[1][-2:], ['resume', A])
 
 
+class FakeAsk:
+    """Stands in for ccd's questions: typed answers in order, everything said kept as text."""
+    def __init__(self, texts=(), choices=()):
+        self.texts, self.choices, self.said = list(texts), list(choices), ''
+
+    def say(self, lines):
+        self.said += '\n'.join(''.join(t for t, _ in l) for l in lines) + '\n'
+
+    def text(self, *a, **k):
+        return self.texts.pop(0)
+
+    def choose(self, *a, **k):
+        return self.choices.pop(0)
+
+
 class AddRemove(Folders):
     def run_add(self, name, pings, tty=False):
         out, err = io.StringIO(), io.StringIO()
@@ -320,20 +341,37 @@ class AddRemove(Folders):
                 code = e.code
         return code, out.getvalue(), run
 
-    def test_a_new_folder_shares_his_settings_and_signs_in(self):
+    def test_a_new_folder_shares_his_settings_and_signs_in_through_the_questions(self):
         with open(os.path.join(self.main, 'config.toml'), 'w') as f:
             f.write('model = "x"\n')
         os.makedirs(os.path.join(self.main, 'skills'))
         pings = [lambda a: dict(a, error='not signed in'), lambda a: dict(a, five=0.0, week=0.1, org='new')]
-        code, out, run = self.run_add('Work', lambda a: pings.pop(0)(a), tty=True)
+        ask = FakeAsk(texts=['Work'])
+        with mock.patch.object(ccd, 'CODEX', '/bin/codex'), \
+                mock.patch.object(ccd, 'codex_ping', side_effect=lambda a: pings.pop(0)(a)), \
+                mock.patch.object(ccd, 'codex_check', side_effect=lambda accts: [dict(a, org='other') for a in accts]), \
+                mock.patch.object(ccd.os.path, 'expanduser', side_effect=lambda p: p.replace('~', self.root, 1)), \
+                mock.patch.object(ccd.subprocess, 'run') as run:
+            self.assertEqual(ccd.cx_add_here(ask), 0)
         home = os.path.join(self.root, '.codex-work')
-        self.assertEqual(code, 0)
         self.assertEqual(run.call_args[0][0], ['/bin/codex', 'login'])
         self.assertEqual(run.call_args[1]['env']['CODEX_HOME'], home)
         self.assertEqual(os.readlink(os.path.join(home, 'config.toml')), os.path.join(self.main, 'config.toml'))
         self.assertTrue(os.path.islink(os.path.join(home, 'skills')))
         self.assertFalse(os.path.lexists(os.path.join(home, 'AGENTS.md')))  # none to share
         self.assertEqual(ccd.codex_added(), [('work', 'Work', home)])
+        self.assertIn('Added', ask.said)
+        self.assertIn('Add a Codex account', ask.said)
+
+    def test_a_failed_sign_in_removes_the_folder_it_made(self):
+        ask = FakeAsk(texts=['Work'])
+        with mock.patch.object(ccd, 'CODEX', '/bin/codex'), \
+                mock.patch.object(ccd, 'codex_ping', side_effect=lambda a: dict(a, error='not signed in')), \
+                mock.patch.object(ccd.os.path, 'expanduser', side_effect=lambda p: p.replace('~', self.root, 1)), \
+                mock.patch.object(ccd.subprocess, 'run'):
+            self.assertEqual(ccd.cx_add_here(ask), 1)
+        self.assertFalse(os.path.lexists(os.path.join(self.root, '.codex-work')))
+        self.assertIn('Nothing added: not signed in', ask.said)
 
     def test_a_folder_already_signed_in_is_used_as_it_is(self):
         home = os.path.join(self.root, '.codex-b')
@@ -371,6 +409,129 @@ class AddRemove(Folders):
         self.assertIn('left as it is', out.getvalue())
         with self.assertRaises(SystemExit):
             ccd.cmd_cx_remove(['main'])
+
+
+class Plans(unittest.TestCase):
+    def test_plan_from_codex_and_the_filter(self):
+        a = signed_in()
+        for name, dollars in (('plus', 20), ('prolite', 100), ('pro', 200), ('free', None)):
+            a['account/read']['account']['planType'] = name
+            self.assertEqual(Ping.ping(Ping(), a).get('plan'), dollars)
+        b, c = dict(acct('b', 0.1), plan=100), dict(acct('c', 0.5), plan=200)
+        call, _, _ = start('cxd', ['200'], [b, c])
+        self.assertEqual(call[2]['CODEX_HOME'], '/x/c')
+        self.assertNotIn('200', call[1])
+        _, code, _ = start('cxd', ['100'], [dict(b, blocked=True), c])
+        self.assertIn('no $100 Codex account has room', code)
+
+
+class WaitAndCopy(Folders):
+    def test_open_chat_shows_the_wait_screen_and_c_forks_a_copy(self):
+        d = self.home('d')
+        src = write_chat(self.main, A, limited=True)
+        chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
+
+        class Wait:
+            def wait(self, chat, still_open):
+                self.was_open = still_open()
+                return 'copy'
+
+            def close(self):
+                pass
+        w = Wait()
+        with mock.patch.object(ccd, 'codex_open_files', return_value={os.path.realpath(src)}), \
+                mock.patch.object(ccd, 'Menu', return_value=w), redirect_stderr(io.StringIO()) as err:
+            words = ccd.codex_carry_words(chat, d, [])
+        self.assertTrue(w.was_open)
+        self.assertEqual(words, ['fork', A, ccd.NUDGE_COPY])
+        self.assertIn('as a copy', err.getvalue())
+
+    def test_once_the_window_closes_it_carries_on_the_same_chat(self):
+        src = write_chat(self.main, A)
+        chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
+        looks = [{os.path.realpath(src)}, set()]
+        menu = mock.Mock()
+        menu.wait.side_effect = lambda chat, still_open: 'same' if not still_open() else None
+        with mock.patch.object(ccd, 'codex_open_files', side_effect=lambda: looks.pop(0) if looks else set()), \
+                mock.patch.object(ccd, 'Menu', return_value=menu), mock.patch.object(ccd.time, 'sleep'), \
+                redirect_stderr(io.StringIO()):
+            self.assertEqual(ccd.codex_carry_words(chat, self.main, []), ['resume', A])
+
+
+class AutoMove(Folders):
+    def test_state_follows_the_last_turn(self):
+        p = write_chat(self.main, A, limited=True)
+        st = ccd.codex_state(p)
+        self.assertEqual((st['id'], st['limited']), (A, True))
+        with open(p, 'a') as f:
+            f.write(line('event_msg', type='item_completed', item={'type': 'UserMessage', 'content': [{'text': 'go'}]}))
+        self.assertFalse(ccd.codex_state(p)['limited'])
+
+    def watch(self, path, room_to, cpu=0.0, stop_after=4):
+        move, stop = {}, mock.Mock()
+        stop.wait.side_effect = [False] * stop_after + [True]
+        with mock.patch.object(ccd, 'running', return_value=True), \
+                mock.patch.object(ccd, 'codex_window_chat', return_value=path), \
+                mock.patch.object(ccd, 'ps_table', return_value='1 1 0'), \
+                mock.patch.object(ccd, 'tree_load', return_value=cpu), \
+                mock.patch.object(ccd, 'codex_room_elsewhere', return_value=room_to), \
+                mock.patch.object(ccd, 'GRACE', -5), mock.patch.object(ccd, 'CPU_WINDOW', 0), \
+                mock.patch.object(ccd.os, 'kill') as kill:
+            ccd.codex_watch(4242, 'main', self.main, None, move, stop)
+        return move, kill
+
+    def limited_now(self):
+        p = write_chat(self.main, A)
+        with open(p, 'a') as f:
+            f.write(json.dumps({'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() + 1)),
+                                'type': 'event_msg', 'payload': {'type': 'task_complete',
+                                                                  'error': {'codex_error_info': 'usage_limit_exceeded'}}})
+                    + '\n')
+        return p
+
+    def test_a_chat_at_its_limit_is_closed_and_sent_where_there_is_room(self):
+        p = self.limited_now()
+        move, kill = self.watch(p, acct('d', 0.2, home='/x/d'))
+        kill.assert_called_once_with(4242, ccd.signal.SIGTERM)
+        self.assertEqual((move['id'], move['to']['key'], move['path']), (A, 'd', p))
+
+    def test_it_waits_while_something_it_started_is_working_or_no_room(self):
+        p = self.limited_now()
+        self.assertEqual(self.watch(p, acct('d', 0.2), cpu=50.0)[0], {})
+        self.assertEqual(self.watch(p, None)[0], {})
+
+    def test_an_old_limit_from_before_the_window_opened_is_left_alone(self):
+        p = write_chat(self.main, A, limited=True)  # its stop has no time: long before this window
+        self.assertEqual(self.watch(p, acct('d', 0.2))[0], {})
+
+    def test_supervise_reopens_the_chat_on_the_new_account(self):
+        d = self.home('d')
+        p = write_chat(self.main, A, limited=True)
+        launched = []
+
+        class Child:
+            def __init__(self, words, env, close_fds):
+                launched.append((words, env['CODEX_HOME']))
+                self.pid = 100 + len(launched)
+
+        def watch(pid, account, home, want, move, stop, stopped_on, known):
+            if len(launched) == 1:
+                move.update(going=True, id=A, path=p, to=dict(acct('D', 0.2, home=d), key='d'), old=account)
+        with mock.patch.object(ccd, 'CODEX', '/bin/codex'), mock.patch.object(ccd.subprocess, 'Popen', Child), \
+                mock.patch.object(ccd, 'codex_watch', watch), mock.patch.object(ccd, 'wait_for', return_value=0), \
+                mock.patch.object(ccd, 'terminal_state'), mock.patch.object(ccd, 'tidy_terminal'), \
+                mock.patch.object(ccd, 'note_move'), mock.patch.object(ccd.signal, 'signal'), \
+                mock.patch.object(ccd, 'codex_queue', return_value=True) as q, redirect_stderr(io.StringIO()) as err:
+            code = ccd.codex_supervise([], {'CODEX_HOME': self.main}, 'main', None)
+        self.assertEqual(code, 0)
+        self.assertEqual(launched[0], (['/bin/codex', '--dangerously-bypass-approvals-and-sandbox'], self.main))
+        words, home = launched[1]
+        self.assertEqual((words, home), (['/bin/codex', '--dangerously-bypass-approvals-and-sandbox', '-c',
+                                          'check_for_update_on_startup=false', 'resume', A], d))
+        self.assertEqual(q.call_args[0][:2], (d, A))
+        self.assertTrue(q.call_args[0][2].endswith(ccd.NUDGE))
+        self.assertTrue(os.path.isfile(os.path.join(d, os.path.relpath(p, self.main))))
+        self.assertIn('reached its limit on your Codex login. Carrying on, on D', err.getvalue())
 
 
 class Dispatch(unittest.TestCase):
