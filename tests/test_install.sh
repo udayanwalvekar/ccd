@@ -34,6 +34,11 @@ out="$(run "$H" bash "$PWD/ccd.sh")" && [ -x "$H/.local/share/ccd/ccd" ] && [ -L
 v="$(run "$H" "$H/.local/bin/ccd" --version)" || true; [ "$v" = "ccd $(sed -n "s/^VERSION = '\(.*\)'$/\1/p" ccd)" ] \
   && ok "ccd --version answers ($v)" || bad "ccd --version: $v"
 grep -q "is installed" <<<"$out" && ok "says what to do next" || bad "no closing words: $out"
+[ -L "$H/.local/bin/cxd" ] && [ -L "$H/.local/bin/cxdm" ] && [ -L "$H/.local/bin/cxdr" ] \
+  && [ "$(readlink "$H/.local/bin/cxd")" = "$H/.local/share/ccd/ccd" ] && ok "cxd, cxdm and cxdr installed too" \
+  || bad "cxd links: $(ls -l "$H/.local/bin")"
+v="$(run "$H" "$H/.local/bin/cxd" help)" || true; grep -q "ccd for Codex" <<<"$v" \
+  && ok "cxd help answers" || bad "cxd help: $v"
 
 H="$(fresh piped)"
 out="$(run "$H" bash -c "cat '$PWD/ccd.sh' | bash; echo AFTER")" || true

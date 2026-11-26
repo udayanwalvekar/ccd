@@ -37,6 +37,25 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 "claude_args": []
 ```
 
+## Codex too: cxd
+
+`cxd` is ccd for Codex. It starts every chat in dangerously mode (`--dangerously-bypass-approvals-and-sandbox`) on whichever of your Codex accounts has the most usage left.
+
+| Type | What it does |
+|---|---|
+| `cxd` | Starts Codex on the account with the most usage left. |
+| `cxdm` | Shows your Codex accounts and how much is left on each. You pick one. |
+| `cxdr` | Shows your recent Codex chats. You pick one, and it carries on on another account. `cxdr <id>` skips the list. |
+| `cxd accounts` | Shows how much is left on every Codex account. |
+| `cxd add <name>` | Adds another Codex account. Codex opens its sign-in page in your browser. |
+| `cxd remove <name>` | Forgets an account. Its folder and chats stay. |
+
+Codex keeps each login in its own folder, so every account you add gets one: `~/.codex-<name>`. That folder links `config.toml`, `AGENTS.md`, `rules` and `skills` to your usual `~/.codex`, so every account works the same. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it as it is.
+
+ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. `cxdr` copies the chat into the new account's folder and reopens it there. A Codex chat doesn't move by itself yet when it hits its limit: run `cxdr` and it's on top of the list.
+
+Want Codex's own approvals back? Add `"codex_args": []` to `~/.config/ccd/config.json`. Your own `--sandbox`, `--ask-for-approval` or `--full-auto` also replaces the default for that chat.
+
 ## Setup
 
 You can also ask Claude Code to install it for you:

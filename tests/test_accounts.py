@@ -5,12 +5,15 @@ Run: python3 -I tests/test_accounts.py"""
 import io, json, os, stat, sys, tempfile, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from unittest import mock
 
 SANDBOX = tempfile.mkdtemp(prefix='ccd-test-')
 os.environ['CCD_HOME'] = os.path.join(SANDBOX, 'config')  # before loading: where settings and tokens go
 os.environ['CCD_TOKEN_STORE'] = 'file'
-ccd = SourceFileLoader('ccd_accounts', os.path.join(os.path.dirname(__file__), '..', 'ccd')).load_module()
+_loader = SourceFileLoader('ccd_accounts', os.path.join(os.path.dirname(__file__), '..', 'ccd'))
+ccd = module_from_spec(spec_from_loader('ccd_accounts', _loader))
+_loader.exec_module(ccd)
 ccd.CLAUDE = os.path.join(SANDBOX, 'no-such-claude')  # a test that slips through to starting claude fails, never runs it
 
 TOKEN = 'sk-ant-oat01-' + 'Ab3_-' * 20
