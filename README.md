@@ -52,9 +52,9 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 | `cxd remove <name>` | Forgets an account. Its folder and chats stay. |
 | `CCD_AUTO=0 cxd` | Starts a chat that won't move by itself. |
 
-Codex keeps each login in a folder of its own, so every account you add gets one: `~/.codex-<name>`. It links `config.toml`, `AGENTS.md`, `rules` and `skills` to your usual `~/.codex`, so every account works the same. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it as it is.
+Codex keeps each login in a folder of its own, so every account you add gets one: `~/.codex-<name>`. It links `config.toml`, `AGENTS.md`, `rules`, `skills` and your chats (`sessions`) to your usual `~/.codex`, so every account works the same, and every chat is in one place, like Claude's: plain `codex resume` finds it whichever account it ran on. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it, and moves its chats into `~/.codex/sessions` (a chat that is in both keeps its newer copy; the older one goes to `~/.codex/sessions-older-copies`).
 
-ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. A move copies the chat into the new account's folder and reopens it there, and Codex sends the carry-on note by itself. The move works like ccd's: it waits 20 seconds, waits for a command that's still working, and checks again every 5 minutes if no account has room.
+ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. A move reopens the same chat on the new account, and Codex sends the carry-on note by itself. The move works like ccd's: it waits 20 seconds, waits for a command that's still working, and checks again every 5 minutes if no account has room.
 
 Want Codex's own approvals back? Add `"codex_args": []` to `~/.config/ccd/config.json`. Your own `--sandbox`, `--ask-for-approval` or `--full-auto` also replaces the default for that chat.
 

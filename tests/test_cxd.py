@@ -379,7 +379,8 @@ class AddRemove(Folders):
         code, out, run = self.run_add('b', lambda a: dict(a, five=0.0, week=0.5, org='b'))
         self.assertEqual(code, 0)
         run.assert_not_called()
-        self.assertEqual(os.listdir(home), [])
+        self.assertEqual(sorted(os.listdir(home)), ['archived_sessions', 'sessions'])  # its chats join the others
+        self.assertTrue(os.path.islink(os.path.join(home, 'sessions')))
         self.assertIn('added b', out)
 
     def test_no_terminal_and_not_signed_in_leaves_nothing_behind(self):
@@ -532,6 +533,54 @@ class AutoMove(Folders):
         self.assertTrue(q.call_args[0][2].endswith(ccd.NUDGE))
         self.assertTrue(os.path.isfile(os.path.join(d, os.path.relpath(p, self.main))))
         self.assertIn('reached its limit on your Codex login. Carrying on, on D', err.getvalue())
+
+
+class Share(Folders):
+    def test_a_folder_without_chats_gets_links(self):
+        h = os.path.join(self.root, 'codex-new')
+        os.makedirs(h)
+        self.assertEqual(ccd.codex_share(h), 0)
+        for n in ccd.CODEX_CHATS:
+            self.assertEqual(os.readlink(os.path.join(h, n)), os.path.join(self.main, n))
+
+    def test_existing_chats_move_once_and_the_newer_copy_wins(self):
+        b = os.path.join(self.root, 'codex-b')
+        mine = write_chat(b, A, said=('on b',))
+        both_old = write_chat(self.main, B, said=('old copy',), age=500)
+        both_new = write_chat(b, B, said=('new copy',))
+        self.assertEqual(ccd.codex_share(b), 2)
+        self.assertTrue(os.path.islink(os.path.join(b, 'sessions')))
+        moved = os.path.join(self.main, os.path.relpath(mine, b))
+        self.assertTrue(os.path.isfile(moved))
+        self.assertTrue(os.path.isfile(mine))  # the old path still leads to it
+        with open(os.path.join(self.main, os.path.relpath(both_new, b))) as f:
+            self.assertIn('new copy', f.read())
+        kept = os.path.join(self.main, 'sessions-older-copies', 'codex-b', os.path.relpath(both_old, self.main)[len('sessions/'):])
+        with open(kept) as f:
+            self.assertIn('old copy', f.read())
+        self.assertEqual([n for n in os.listdir(self.root) if 'moving' in n or 'moving' in ''.join(os.listdir(b))], [])
+        self.assertEqual(ccd.codex_share(b), 0)  # already shared: nothing happens again
+
+    def test_the_usual_folder_is_never_linked_to_itself(self):
+        write_chat(self.main, A)
+        self.assertEqual(ccd.codex_share(self.main), 0)
+        self.assertFalse(os.path.islink(os.path.join(self.main, 'sessions')))
+
+    def test_shared_chats_are_listed_once_and_need_no_copy(self):
+        b = self.home('b')
+        shutil.rmtree(b)
+        os.makedirs(b)
+        ccd.codex_share(b)
+        p = write_chat(self.main, A)
+        with mock.patch.object(ccd, 'codex_open_files', return_value=set()):
+            chs = ccd.codex_chats()
+        self.assertEqual([(c['id'], c['account']) for c in chs], [(A, None)])
+        with mock.patch.object(ccd.shutil, 'copy2') as cp:
+            self.assertEqual(ccd.codex_copy(p, self.main, b), p)
+        cp.assert_not_called()
+
+    def test_each_account_runs_in_its_own_folder(self):
+        self.assertEqual(ccd.codex_env('/x/b')['CODEX_HOME'], '/x/b')
 
 
 class Dispatch(unittest.TestCase):

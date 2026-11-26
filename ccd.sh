@@ -1823,8 +1823,9 @@ accounts by itself when the one it is on runs out.
   cxd remove X    forget an account (its folder and chats stay)
   cxd 200 / 100   only accounts on that plan ($ a month)
 
-Your usual Codex login (~/.codex) needs no setup. An added account's folder links config.toml, AGENTS.md, rules and
-skills to ~/.codex, so every account works the same. Limits are read from Codex itself (codex app-server, in that
+Your usual Codex login (~/.codex) needs no setup. An added account's folder links config.toml, AGENTS.md, rules,
+skills and its chats (sessions) to ~/.codex, so every account works the same and every chat can be reopened on any
+account, by cxd or by plain `codex resume`. Limits are read from Codex itself (codex app-server, in that
 account's folder): ccd never reads or moves a Codex token.
 
 Every chat cxd starts in a terminal is watched, as ccd watches Claude chats: when it stops at a usage limit while
@@ -1834,6 +1835,7 @@ Settings: ~/.config/ccd/config.json ("codex_args": the words every chat starts w
 Your own approval or sandbox words (--sandbox, --ask-for-approval, --full-auto) replace the default for that chat."""
 CODEX_MAIN = os.path.expanduser('~/.codex')
 CODEX_SHARED = ('config.toml', 'AGENTS.md', 'rules', 'skills')  # a new account's folder links these to ~/.codex
+CODEX_CHATS = ('sessions', 'archived_sessions')  # every account's folder links these to ~/.codex: one set of chats
 CODEX_SKIP_PROMPTS = ['--dangerously-bypass-approvals-and-sandbox']
 CODEX_MODES = ('--sandbox', '-s', '--ask-for-approval', '-a', '--full-auto', '--yolo',
                '--dangerously-bypass-approvals-and-sandbox')
@@ -1874,6 +1876,70 @@ def codex_added():
 def codex_accounts():
     return [{'key': 'main', 'label': 'Your Codex login', 'home': CODEX_MAIN}] + [
         {'key': k, 'label': l, 'home': h} for k, l, h in codex_added()]
+
+
+def codex_share(home):
+    """Keep this account's chats with every other account's, the way all Claude accounts share ~/.claude: its
+    sessions folders become links to ~/.codex's, and chats already in it move there once. Each file is moved
+    whole by a rename, so a Codex that is writing one carries on writing it, and the old paths still lead to it.
+    A file that is in both places keeps its newer copy; the older one goes to ~/.codex/sessions-older-copies.
+    Returns how many chats moved."""
+    moved = 0
+    for name in CODEX_CHATS:
+        link, there = os.path.join(home, name), os.path.join(CODEX_MAIN, name)
+        if os.path.realpath(home) == os.path.realpath(CODEX_MAIN) or os.path.islink(link):
+            continue
+        os.makedirs(there, exist_ok=True)
+        if not os.path.lexists(link):
+            os.symlink(there, link)
+            continue
+        if not os.path.isdir(link):
+            continue
+        old = '%s.cxd-moving-%d' % (link, os.getpid())
+        os.rename(link, old)  # then the link straight away: a Codex starting a chat now finds the shared folder
+        os.symlink(there, link)
+        for top, _, files in os.walk(old):
+            for f in files:
+                src = os.path.join(top, f)
+                dst = os.path.join(there, os.path.relpath(src, old))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                if os.path.lexists(dst):
+                    newer, older = (src, dst) if os.path.getmtime(src) > os.path.getmtime(dst) else (dst, src)
+                    keep = os.path.join(CODEX_MAIN, 'sessions-older-copies', os.path.basename(home), os.path.relpath(src, old))
+                    os.makedirs(os.path.dirname(keep), exist_ok=True)
+                    os.rename(older, keep)
+                    if newer == src:
+                        os.rename(src, dst)
+                else:
+                    os.rename(src, dst)
+                moved += f.endswith('.jsonl')
+        for top, dirs, files in os.walk(old, topdown=False):
+            try:
+                os.rmdir(top)
+            except OSError:
+                pass
+    return moved
+
+
+def codex_env(home):
+    """The environment a Codex of this account runs in. Each account keeps its own records (its databases); the
+    chat files they point at are shared, and Codex finds a chat from another account by its file. (Pointing every
+    account at one set of databases splits a queued message from the chat it is for: `codex queue` goes through
+    the account's own background server, which keeps its own databases.)"""
+    return dict(os.environ, CODEX_HOME=home)
+
+
+def codex_share_all():
+    """Every added account shares the chats in ~/.codex; says so once when chats move."""
+    for key, label, home in codex_added():
+        try:
+            n = codex_share(home) if os.path.isdir(home) else 0
+        except OSError as e:
+            print('cxd: could not share the chats of %s with your other accounts (%s)' % (label, e), file=sys.stderr)
+            continue
+        if n:
+            print('cxd: moved %d chats of %s into ~/.codex/sessions, so every account sees them' % (n, label),
+                  file=sys.stderr)
 
 
 def codex_ask(home, methods, timeout=20):
@@ -2032,8 +2098,14 @@ def codex_chats(now=None, sid=None):
     """His Codex chats across every account: the last two days' (or the one with this id, however old), those that
     stopped at a limit first, then newest first. A chat copied to another account is listed once, as its newest copy."""
     now = now or time.time()
-    best = {}
+    best, seen = {}, set()
     for acct in codex_accounts():
+        folder = os.path.realpath(os.path.join(acct['home'], 'sessions'))
+        if folder in seen:
+            continue  # the same chats as an account already looked at
+        seen.add(folder)
+        shared = any(os.path.realpath(os.path.join(h, 'sessions')) == folder
+                     for k, _, h in codex_added() if k != acct['key'])
         for path in codex_files(acct['home']):
             if sid and not (path.endswith('-%s.jsonl' % sid) and len(sid) >= 32):  # the whole id, never part of it
                 continue
@@ -2043,6 +2115,8 @@ def codex_chats(now=None, sid=None):
             except OSError:
                 continue
             c = read_codex_chat(path, acct)
+            if c and shared:
+                c['account'] = None  # shared chats don't say which account they last ran on
             if c and sid and c['id'] != sid:
                 continue
             if c and (c['id'] not in best or c['when'] > best[c['id']]['when']):
@@ -2083,8 +2157,8 @@ def codex_copy(path, home_from, home_to):
     """Put a chat file in another account's folder, whole or not at all (a cut-short copy would be the newest
     and win over the real one). Returns where it went."""
     there = os.path.join(home_to, os.path.relpath(path, home_from))
-    if os.path.realpath(home_from) == os.path.realpath(home_to):
-        return path
+    if os.path.realpath(os.path.dirname(path)) == os.path.realpath(os.path.dirname(there)):
+        return path  # the accounts share their chats: nothing to copy
     if os.environ.get('CCD_DRY_RUN'):
         print('cxdr: dry run, would copy the chat to %s' % there, file=sys.stderr)
         return there
@@ -2106,7 +2180,7 @@ def codex_queue(home, sid, message):
         return True
     try:
         return subprocess.run([CODEX, 'queue', '--thread', sid, '--message', message], capture_output=True,
-                              env=dict(os.environ, CODEX_HOME=home), timeout=60).returncode == 0
+                              env=codex_env(home), timeout=60).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -2160,6 +2234,7 @@ def cxd_main(called, args):
     """cxd, cxdm and cxdr: start Codex on the account with the most room, or the one he chooses."""
     if not CODEX:
         sys.exit('cxd: Codex is not installed: https://developers.openai.com/codex/cli')
+    codex_share_all()
     manual, carry, chat = called == 'cxdm', called == 'cxdr', None
     plan = lambda: int(args.pop(0)) if args and args[0] in ('100', '200') else None  # `cxd 200` = $200 plans only
     want = plan()
@@ -2227,7 +2302,7 @@ def cxd_main(called, args):
                                                              + (' + the carry-on note' if NUDGE in words else '')),
               file=sys.stderr)
         return 0
-    env = dict(os.environ, CODEX_HOME=home)
+    env = codex_env(home)
     if auto_on() and not own_words:  # stay behind the chat, to carry it on if it stops at a limit
         sys.exit(codex_supervise(args, env, pick['key'] if pick else 'main', want, chat and chat['id']))
     os.execve(CODEX, [CODEX] + words, env)
@@ -2416,7 +2491,7 @@ def codex_supervise(args, env, account, want, known=None):
         said = '(cxd moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
             names.get(account, account), to['label'], time.strftime('%H:%M'))
         account, known = to['key'], move['id']
-        env = dict(env, CODEX_HOME=homes.get(to['key'], to['home']))
+        env = dict(env, **codex_env(homes.get(to['key'], to['home'])))
         # Codex's "update available" question would hold the reopened chat until someone presses a key
         words = codex_flags(settings(), args) + ['-c', 'check_for_update_on_startup=false', 'resume', move['id']]
         if not codex_queue(env['CODEX_HOME'], move['id'], said + NUDGE):
@@ -2426,7 +2501,8 @@ def codex_supervise(args, env, account, want, known=None):
 def codex_keep(name, login=None):
     """Make (or find) the folder for a new Codex account, sign it in with `login(home)` if it isn't yet, check
     it is a new account, then keep it. Returns (account, None) or (None, why not). A folder it made is removed
-    again unless the account is kept; a folder that was there already is never touched."""
+    again unless the account is kept; a folder that was there already is never removed, and once kept, its chats
+    join the others in ~/.codex."""
     mine = codex_added()
     if name.lower() in [l.lower() for _, l, _ in mine] + ['main', 'your codex login']:
         return None, 'there is already an account called %s' % name
@@ -2453,6 +2529,7 @@ def codex_keep(name, login=None):
         d['codex_accounts'] = [a for a in d.get('codex_accounts') or [] if isinstance(a, dict)] + [new]
         save_settings(d)
         kept = True
+        got['moved'] = codex_share(home)
         got.update(new)
         return got, None
     finally:
@@ -2478,6 +2555,8 @@ def cmd_cx_add(args):
         if not got:
             sys.exit('cxd add: nothing added: %s' % why)
         print('cxd: added %s (%s), in %s' % (got['label'], figures(got), got['home'].replace(os.path.expanduser('~'), '~', 1)))
+        if got.get('moved'):
+            print('cxd: its %d chats moved into ~/.codex/sessions, so every account sees them' % got['moved'])
         return 0
     try:
         ask = Ask()
@@ -2519,6 +2598,7 @@ def cx_add_here(ask, name=''):
 def cmd_cx_accounts(args):
     """`cxd accounts`: every Codex account with its 5-hour and weekly limits."""
     global PLAIN
+    codex_share_all()
     if not sys.stdout.isatty():
         PLAIN = True
     accts = codex_check(codex_accounts())
