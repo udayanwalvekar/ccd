@@ -43,6 +43,9 @@ def signed_in(week_used=36, five_used=None, reached=None, resets=None):
                                                        'rateLimitReachedType': reached}}}
 
 
+A, B, C, D, OLD = '01a2167a-5b39-72b1-af86-061d6873b493', '01a216a5-661a-7cc3-8e39-a399c6419df9', '01a21385-cfe1-7000-8000-000000000001', '01a21385-cfe1-7000-8000-000000000002', '01a1fc35-9611-71c1-a37d-cda861a00001'
+
+
 def line(kind, **payload):
     return json.dumps({'type': kind, 'payload': payload}) + '\n'
 
@@ -51,7 +54,8 @@ def write_chat(home, sid, said=('fix the login page',), limited=False, originato
     path = os.path.join(home, 'sessions', '2026', '11', '26', 'rollout-2026-11-26T10-00-00-%s.jsonl' % sid)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w') as f:
-        f.write(line('session_meta', id=sid, cwd=cwd, originator=originator, base_instructions={'text': 'x' * 5000}))
+        f.write(line('session_meta', account_scoped=True, creator_user_id='user-1', creator_account_id='acc-1', session_id=sid,
+                     id=sid, cwd=cwd, originator=originator, source='vscode', base_instructions={'text': 'x' * 5000}))
         f.write(line('response_item', type='message', role='user', content=[{'type': 'input_text', 'text': '# AGENTS.md'}]))
         for words in said:
             f.write(line('event_msg', type='item_completed',
@@ -114,6 +118,17 @@ class Ping(unittest.TestCase):
 
     def test_same_person_same_org(self):
         self.assertEqual(self.ping(signed_in())['org'], 'user-1/acc-1')
+        a = signed_in()
+        a['account/read'].pop('workspaceRouting')
+        self.assertNotIn('org', self.ping(a))  # unknown workspace: never taken for another account
+
+    def test_no_limits_answer_is_not_an_empty_account(self):
+        for limits in (None, {'rateLimits': {'primary': None, 'secondary': None}}):
+            a = signed_in()
+            a['account/rateLimits/read'] = limits
+            got = self.ping(a)
+            self.assertNotIn('five', got)
+            self.assertIn('how much is left', got['error'])
 
     def test_real_protocol_against_a_stand_in_app_server(self):
         d = tempfile.mkdtemp(prefix='cxd-fake-')
@@ -196,32 +211,32 @@ class Choose(unittest.TestCase):
 class Chats(Folders):
     def test_only_his_terminal_chats_newest_and_stopped_first(self):
         b = self.home('b')
-        write_chat(self.main, 'aaa', said=('first words', 'later words'), age=100)
-        write_chat(b, 'bbb', limited=True, age=300)
-        write_chat(self.main, 'ccc', originator='codex_exec')
-        write_chat(self.main, 'ddd', age=ccd.RECENT + 60)
+        write_chat(self.main, A, said=('first words', 'later words'), age=100)
+        write_chat(b, B, limited=True, age=300)
+        write_chat(self.main, C, originator='codex_exec')
+        write_chat(self.main, D, age=ccd.RECENT + 60)
         with mock.patch.object(ccd, 'codex_open_files', return_value=set()):
             chs = ccd.codex_chats()
-        self.assertEqual([c['id'] for c in chs], ['bbb', 'aaa'])
+        self.assertEqual([c['id'] for c in chs], [B, A])
         self.assertEqual((chs[0]['account'], chs[0]['limited']), ('b', True))
         self.assertEqual((chs[1]['title'], chs[1]['said']), ('first words', 'later words'))
 
     def test_a_copied_chat_is_listed_once_as_its_newest_copy(self):
         b = self.home('b')
-        write_chat(self.main, 'aaa', age=500)
-        write_chat(b, 'aaa', said=('fix the login page', 'and the logout'))
+        write_chat(self.main, A, age=500)
+        write_chat(b, A, said=('fix the login page', 'and the logout'))
         with mock.patch.object(ccd, 'codex_open_files', return_value=set()):
             chs = ccd.codex_chats()
-        self.assertEqual([(c['id'], c['account']) for c in chs], [('aaa', 'b')])
+        self.assertEqual([(c['id'], c['account']) for c in chs], [(A, 'b')])
 
     def test_by_id_however_old(self):
-        write_chat(self.main, 'old1', age=30 * 86400)
+        write_chat(self.main, OLD, age=30 * 86400)
         with mock.patch.object(ccd, 'codex_open_files', return_value=set()):
-            self.assertEqual([c['id'] for c in ccd.codex_chats(sid='old1')], ['old1'])
-            self.assertEqual(ccd.codex_chats(sid='old'), [])  # never a near match
+            self.assertEqual([c['id'] for c in ccd.codex_chats(sid=OLD)], [OLD])
+            self.assertEqual(ccd.codex_chats(sid=OLD[-12:]), [])  # never a near match
 
     def test_answering_again_after_a_limit_is_not_limited(self):
-        p = write_chat(self.main, 'aaa', limited=True)
+        p = write_chat(self.main, A, limited=True)
         with open(p, 'a') as f:
             f.write(line('event_msg', type='item_completed', item={'type': 'UserMessage', 'content': [{'text': 'go on'}]}))
             f.write(line('event_msg', type='task_complete', error=None))
@@ -231,26 +246,50 @@ class Chats(Folders):
 class Carry(Folders):
     def test_copies_into_the_new_account_and_resumes_with_the_note(self):
         d = self.home('d')
-        src = write_chat(self.main, 'aaa', limited=True, cwd=self.root)
+        src = write_chat(self.main, A, limited=True, cwd=self.root)
         chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
         here = os.getcwd()
         self.addCleanup(os.chdir, here)
         with mock.patch.object(ccd, 'codex_open_files', return_value=set()), redirect_stderr(io.StringIO()):
             words = ccd.codex_carry_words(chat, d, [])
-        self.assertEqual(words, ['resume', 'aaa', ccd.NUDGE])
+        self.assertEqual(words, ['resume', A, ccd.NUDGE])
         self.assertTrue(os.path.isfile(os.path.join(d, os.path.relpath(src, self.main))))
         self.assertEqual(os.path.realpath(os.getcwd()), os.path.realpath(self.root))
 
     def test_his_own_words_replace_the_note_and_the_same_folder_is_not_copied(self):
-        src = write_chat(self.main, 'aaa', limited=True)
+        src = write_chat(self.main, A, limited=True)
         chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
         with mock.patch.object(ccd, 'codex_open_files', return_value=set()), \
                 mock.patch.object(ccd.shutil, 'copy2') as cp, redirect_stderr(io.StringIO()):
-            self.assertEqual(ccd.codex_carry_words(chat, self.main, ['keep going']), ['resume', 'aaa', 'keep going'])
+            self.assertEqual(ccd.codex_carry_words(chat, self.main, ['keep going']), ['resume', A, 'keep going'])
         cp.assert_not_called()
 
+    def test_an_open_copy_in_the_new_folder_or_no_lsof_starts_nothing(self):
+        d = self.home('d')
+        src = write_chat(self.main, A)
+        chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
+        there = os.path.join(d, os.path.relpath(src, self.main))
+        for live in ({os.path.realpath(there)}, None):
+            with mock.patch.object(ccd, 'codex_open_files', return_value=live), self.assertRaises(SystemExit):
+                ccd.codex_carry_words(chat, d, [])
+        self.assertFalse(os.path.exists(there))
+
+    def test_a_failed_copy_leaves_no_chat_file_behind(self):
+        d = self.home('d')
+        src = write_chat(self.main, A)
+        chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
+
+        def half(a, b):
+            open(b, 'w').write('{"type": "session_meta"')
+            raise OSError('disk full')
+        with mock.patch.object(ccd, 'codex_open_files', return_value=set()), \
+                mock.patch.object(ccd.shutil, 'copy2', side_effect=half), self.assertRaises(OSError):
+            ccd.codex_carry_words(chat, d, [])
+        folder = os.path.dirname(os.path.join(d, os.path.relpath(src, self.main)))
+        self.assertEqual(os.listdir(folder), [])
+
     def test_still_open_in_a_window_starts_nothing(self):
-        src = write_chat(self.main, 'aaa')
+        src = write_chat(self.main, A)
         chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
         with mock.patch.object(ccd, 'codex_open_files', return_value={os.path.realpath(src)}):
             with self.assertRaises(SystemExit) as e:
@@ -258,13 +297,13 @@ class Carry(Folders):
         self.assertIn('still open', str(e.exception.code))
 
     def test_a_limited_chat_moves_off_the_account_it_stopped_on(self):
-        src = write_chat(self.main, 'aaa', limited=True)
+        src = write_chat(self.main, A, limited=True)
         chat = ccd.read_codex_chat(src, {'key': 'main', 'home': self.main})
         with mock.patch.object(ccd, 'codex_carry_chat', return_value=chat), \
                 mock.patch.object(ccd, 'codex_carry_words', side_effect=lambda c, h, x: ['resume', c['id']]):
-            call, _, _ = start('cxdr', ['aaa'], [acct('main', 0.0, home=self.main), acct('c', 0.8)])
+            call, _, _ = start('cxdr', [A], [acct('main', 0.0, home=self.main), acct('c', 0.8)])
         self.assertEqual(call[2]['CODEX_HOME'], '/x/c')
-        self.assertEqual(call[1][-2:], ['resume', 'aaa'])
+        self.assertEqual(call[1][-2:], ['resume', A])
 
 
 class AddRemove(Folders):

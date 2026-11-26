@@ -39,6 +39,7 @@ grep -q "is installed" <<<"$out" && ok "says what to do next" || bad "no closing
   || bad "cxd links: $(ls -l "$H/.local/bin")"
 v="$(run "$H" "$H/.local/bin/cxd" help)" || true; grep -q "ccd for Codex" <<<"$v" \
   && ok "cxd help answers" || bad "cxd help: $v"
+v="$(run "$H" "$H/.local/bin/cxd" --version)" || true; [ "${v%% *}" = "cxd" ] && ok "cxd --version says cxd" || bad "cxd --version: $v"
 
 H="$(fresh piped)"
 out="$(run "$H" bash -c "cat '$PWD/ccd.sh' | bash; echo AFTER")" || true

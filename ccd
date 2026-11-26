@@ -1738,7 +1738,7 @@ def cmd_update(args):
 
 
 def cmd_version(args):
-    print('ccd ' + VERSION)
+    print('%s %s' % ('cxd' if os.path.basename(sys.argv[0] if sys.argv else '') in ('cxd', 'cxdm', 'cxdr') else 'ccd', VERSION))
     return 0
 
 
@@ -1827,7 +1827,7 @@ def codex_ask(home, methods, timeout=20):
                     m = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(m, dict) and m.get('id') in asked:
+                if isinstance(m, dict) and m.get('id') in asked and 'method' not in m:  # not a request of its own
                     got[asked[m['id']]] = m['result'] if isinstance(m.get('result'), dict) else None
     finally:
         p.kill()
@@ -1860,10 +1860,14 @@ def codex_ping(acct):
         acct['error'] = 'not signed in: ' + ('run codex once and sign in' if acct['key'] == 'main'
                                              else 'cxd add %s signs it in again' % acct['label'])
         return acct
-    if me.get('userId'):  # one person's own limits: their user and the ChatGPT account they work in
-        acct['org'] = '%s/%s' % (me['userId'], (me.get('workspaceRouting') or {}).get('chatgptAccountId'))
-    acct.update(five=0.0, week=0.0, five_reset=0, week_reset=0, only_week=True)
+    workspace = (me.get('workspaceRouting') or {}).get('chatgptAccountId')
+    if me.get('userId') and workspace:  # one person's own limits: their user and the ChatGPT account they work in
+        acct['org'] = '%s/%s' % (me['userId'], workspace)
     limits = (got.get('account/rateLimits/read') or {}).get('rateLimits') or {}
+    if not any(isinstance(limits.get(w), dict) for w in ('primary', 'secondary')):  # unknown is not empty
+        acct['error'] = 'codex did not say how much is left'
+        return acct
+    acct.update(five=0.0, week=0.0, five_reset=0, week_reset=0, only_week=True)
     for w in (limits.get('primary'), limits.get('secondary')):
         if not isinstance(w, dict):
             continue
@@ -1940,12 +1944,13 @@ def read_codex_chat(path, acct):
 
 
 def codex_open_files():
-    """The chat files Codex windows have open right now (Codex keeps a chat's file open while it is up)."""
+    """The chat files Codex windows have open right now (Codex keeps a chat's file open while it is up); None if
+    that can't be seen."""
     try:
         out = subprocess.run(['/usr/sbin/lsof', '-w', '-Fn', '-c', 'codex'], capture_output=True, text=True,
                              timeout=10).stdout
     except Exception:
-        return set()
+        return None
     return {os.path.realpath(l[1:]) for l in out.splitlines() if l.startswith('n') and l.endswith('.jsonl')}
 
 
@@ -1956,7 +1961,7 @@ def codex_chats(now=None, sid=None):
     best = {}
     for acct in codex_accounts():
         for path in codex_files(acct['home']):
-            if sid and not path.endswith('-%s.jsonl' % sid):
+            if sid and not (path.endswith('-%s.jsonl' % sid) and len(sid) >= 32):  # the whole id, never part of it
                 continue
             try:
                 if not sid and now - os.path.getmtime(path) >= RECENT:
@@ -1964,10 +1969,12 @@ def codex_chats(now=None, sid=None):
             except OSError:
                 continue
             c = read_codex_chat(path, acct)
+            if c and sid and c['id'] != sid:
+                continue
             if c and (c['id'] not in best or c['when'] > best[c['id']]['when']):
                 best[c['id']] = c
     out = list(best.values())
-    live = codex_open_files() if out else set()
+    live = (codex_open_files() or set()) if out else set()
     for c in out:
         c['open'] = {'name': None} if os.path.realpath(c['path']) in live else None
     return sorted(out, key=lambda c: (not c['limited'], -c['when']))
@@ -2001,16 +2008,25 @@ def codex_carry_chat(given):
 def codex_carry_words(chat, home, extra):
     """The chat is made readable in the folder it carries on in (copied there, unless that copy is already the
     newest), then: the words that make codex reopen it. Exits if it is still open in a window."""
-    if os.path.realpath(chat['path']) in codex_open_files():
+    there = os.path.join(home, os.path.relpath(chat['path'], chat['home']))
+    live = codex_open_files()
+    if live is None:
+        sys.exit("cxdr: couldn't see which chats are open (lsof didn't answer). Nothing started.")
+    if {os.path.realpath(chat['path']), os.path.realpath(there)} & live:
         sys.exit('cxdr: that chat is still open in another window. A chat can only run in one place at a time: '
                  'close it there (Ctrl-C), then run cxdr again. Nothing started.')
     if os.path.realpath(chat['home']) != os.path.realpath(home):
-        there = os.path.join(home, os.path.relpath(chat['path'], chat['home']))
         if os.environ.get('CCD_DRY_RUN'):
             print('cxdr: dry run, would copy the chat to %s' % there, file=sys.stderr)
-        else:
+        else:  # whole or not at all: a cut-short copy would be the newest and win over the real one
             os.makedirs(os.path.dirname(there), exist_ok=True)
-            shutil.copy2(chat['path'], there)
+            part = os.path.join(os.path.dirname(there), '.cxd-copy-%d' % os.getpid())
+            try:
+                shutil.copy2(chat['path'], part)
+                os.replace(part, there)
+            finally:
+                if os.path.lexists(part):
+                    os.unlink(part)
     if chat.get('cwd') and os.path.isdir(chat['cwd']):
         os.chdir(chat['cwd'])  # codex reopens a chat in the folder it is started in
     print('cxdr: carrying on “%s”' % cut(chat['title'], 58), file=sys.stderr)
@@ -2111,7 +2127,12 @@ def cmd_cx_add(args):
                 shutil.rmtree(home, ignore_errors=True)
             sys.exit('cxd add: signing in needs a terminal and a browser. Nothing added.')
         print('cxd: Codex now opens a sign-in page in your browser. Sign in there with the account you want to add.')
-        subprocess.run([CODEX, 'login'], env=dict(os.environ, CODEX_HOME=home))
+        try:
+            subprocess.run([CODEX, 'login'], env=dict(os.environ, CODEX_HOME=home))
+        except KeyboardInterrupt:
+            if made:
+                shutil.rmtree(home, ignore_errors=True)
+            return 130
         got = codex_ping(dict(new))
     if 'five' not in got:
         if made:
