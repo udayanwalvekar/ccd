@@ -66,9 +66,9 @@ uses it, and ccd never prints one. An account is checked with a 1-token Haiku ca
 limits from the response headers.
 
 Every chat ccd starts in a terminal is watched: ccd stays behind it, and when the chat stops at a usage limit (or
-because Claude Code was switched off for its account) while another account has room, ccd closes it and reopens the same chat there, in the same window. `CCD_AUTO=0` switches
-that off, and a chat started with words of its own for claude (`ccd --model x`) is never watched: claude is then
-started the plain way, with nothing behind it.
+because Claude Code was switched off for its account) while another account has room, ccd closes it and reopens the
+same chat there, in the same window. `CCD_AUTO=0` switches that off, and a chat started with words of its own for
+claude (`ccd --model x`) is never watched: claude is then started the plain way, with nothing behind it.
 
 Chats start with permission prompts off (claude --dangerously-skip-permissions), so a carried-over chat never sits
 waiting on a question nobody is there to answer.
@@ -223,6 +223,8 @@ def ping(acct):
                 why = ''
             acct['error'] = ('its organisation has switched Claude Code off' if why == 'oauth_not_allowed_for_organization'
                              else 'the token was revoked or has run out' if e.code in (401, 403) else 'error %d' % e.code)
+            if why == 'oauth_not_allowed_for_organization':  # the refusal still names the organisation
+                acct['off'], acct['org'] = True, h.get('anthropic-organization-id')
     except Exception:
         acct['error'] = 'no answer (is the internet on?)'
         return acct
@@ -266,10 +268,13 @@ def login_org():
 def settle(accts):
     """After the checks: an expired login that belongs to the same organisation as an added account that answered
     is that account under its other name (the login is often the last account signed in to): shown once, not twice.
-    (Two people in one team share an organisation too; their login would then wait until it is renewed.)"""
+    (Two people in one team share an organisation too; their login would then wait until it is renewed.)
+    The same for an added account whose organisation has switched Claude Code off: the login could not go on either,
+    and a chat moved off that account must not be moved onto it under its other name."""
     me = next((a for a in accts if a.get('unchecked')), None)
     org = me and login_org()
-    if org and any(a is not me and 'five' in a and not a.get('unchecked') and a.get('org') == org for a in accts):
+    if org and any(a is not me and a.get('org') == org and ('five' in a and not a.get('unchecked') or a.get('off'))
+                   for a in accts):
         return [a for a in accts if a is not me]
     return accts
 
@@ -700,7 +705,7 @@ def chat_frame(chs, at, cols, lines, now, top=0):
     out = [[], [('  ✦  ', teal), ('Which chat do you want to carry on?', bold)], []]
     for i, c in enumerate(chs[top:top + n]):
         on = top + i == at
-        stop = 'stopped: Claude Code switched off on its account · ' if c.get('why') == 'off' else 'stopped at its limit · '
+        stop = 'stopped: account switched off · ' if c.get('why') == 'off' else 'stopped at its limit · '
         note = '   ' + (stop if c['limited'] else '') + ago(now - c['when'])
         out.append([('  ❯ ' if on else '    ', teal + ';1'), ('%d  ' % (i + 1), teal if on else ''),
                     (cut(c['title'], max(12, cols - 8 - len(note))), bold if on else ''),
@@ -1090,13 +1095,13 @@ def supervise(args, env, account, want):
         tidy_terminal(saved)
         off = move.get('why') == 'off'
         print('ccd: %s. Carrying on, on %s (%s).'
-              % (('Claude Code is switched off on %s' if off else 'this chat reached its limit on %s')
+              % (('Claude Code is switched off for %s' if off else 'this chat reached its limit on %s')
                  % names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
         note_move(move['id'], account, to['key'])
         stopped_on[account] = time.time()
         said = '(ccd moved this chat from %s to %s at %s, because %s.) ' % (
             names.get(account, account), to['label'], time.strftime('%H:%M'),
-            'Claude Code was switched off on the first' if off else 'the first reached its usage limit')  # claude clears the screen: say it in the chat
+            'Claude Code was switched off for the first' if off else 'the first reached its usage limit')  # claude clears the screen: say it in the chat
         account, env = to['key'], dict(env)
         env['CCD_ACCOUNT'] = account
         if account == 'main':

@@ -369,6 +369,41 @@ class ExpiredLoginTwin(unittest.TestCase):
         self.assertEqual(self.keys(self.accts('org-t', answered=False), 'org-t'), ['main', 'team'])
         self.assertEqual(self.keys(self.accts('org-t'), None), ['main', 'team'])
 
+    def test_an_expired_login_of_a_switched_off_accounts_organisation_is_dropped(self):
+        # 27 Nov 2026: Claude Code switched off for an account mid-chat. Its check fails but still names the
+        # organisation; the login of that organisation could not go on either, and must not catch the moved chat.
+        accts = self.accts('org-t', answered=False)
+        accts[1].update(error='its organisation has switched Claude Code off', off=True, org='org-t')
+        self.assertEqual(self.keys(accts, 'org-t'), ['team'])
+        self.assertEqual(self.keys(accts, 'org-x'), ['main', 'team'])
+
+    def test_a_chat_moved_off_a_switched_off_account_never_lands_on_its_expired_twin(self):
+        me = dict(key='main', label='Your login', token='x', expired=True, plan=200)
+        off = dict(key='ultra', label='Ultra', token=TOKEN, plan=200)
+        full = dict(key='kumar', label='Kumar', token=TOKEN, plan=200)
+
+        def ping(a):
+            if a['key'] == 'ultra':
+                return dict(a, error='its organisation has switched Claude Code off', off=True, org='org-u')
+            if a['key'] == 'kumar':
+                return dict(a, five=0.0, week=0.64, blocked=False, org='org-k')
+            return dict(a, five=0.0, week=0.0, blocked=False, unchecked=True)
+        with mock.patch.object(ccd, 'accounts', return_value=[me, off, full]), mock.patch.object(ccd, 'ping', side_effect=ping), \
+             mock.patch.object(ccd, 'login_org', return_value='org-u'):
+            to = ccd.room_elsewhere('ultra')
+        self.assertEqual(to['key'], 'kumar')  # before: 'main' (half full by default beat Kumar's 36% left)
+
+    def test_a_switched_off_refusal_keeps_the_organisation_it_names(self):
+        import email.message
+        hdrs = email.message.Message()
+        hdrs['anthropic-organization-id'] = 'org-u'
+        body = json.dumps({'error': {'details': {'error_code': 'oauth_not_allowed_for_organization'}}}).encode()
+        no = ccd.urllib.error.HTTPError(ccd.API, 403, 'Forbidden', hdrs, io.BytesIO(body))
+        with mock.patch.object(ccd.urllib.request, 'urlopen', side_effect=no):
+            a = ccd.ping(dict(key='ultra', label='Ultra', token=TOKEN))
+        self.assertEqual((a['off'], a['org'], 'five' in a), (True, 'org-u', False))
+        self.assertIn('switched Claude Code off', a['error'])
+
     def test_a_login_that_has_not_expired_is_left_to_the_usual_merge(self):
         accts = self.accts('org-t')
         accts[0].pop('unchecked')

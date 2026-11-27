@@ -742,7 +742,7 @@ class ChatScreen(unittest.TestCase):
 
     def test_a_chat_stopped_by_a_switched_off_account_says_so_not_limit(self):
         out = '\n'.join(self.text([dict(a_chat('a', True), why='off')]))
-        self.assertIn('Claude Code switched off on its account', out)
+        self.assertIn('stopped: account switched off', out)
         self.assertNotIn('its limit', out)
 
     def test_the_wait_screen_promises_no_restart_for_a_switched_off_account(self):
@@ -1343,10 +1343,10 @@ class Behind(unittest.TestCase):
         to = {'key': 'ultra', 'label': 'Ultra', 'token': 'tok-ultra', 'five': 0.2, 'week': 0.3}
         _, starts, _, err = self.stay([signal.SIGTERM, 0], moves=[{'id': 'chat-1', 'to': to, 'old': 'team', 'why': 'off'},
                                                                   None])
-        self.assertIn('Claude Code is switched off on team', err)
+        self.assertIn('Claude Code is switched off for team', err)
         self.assertNotIn('limit', err)
         self.assertRegex(starts[1][0][4], r'^\(ccd moved this chat from team to Ultra at \d\d:\d\d, because Claude Code was '
-                                          r'switched off on the first\.\) ')
+                                          r'switched off for the first\.\) ')
 
     def test_a_move_to_his_own_login_drops_the_token(self):
         to = {'key': 'main', 'label': 'your login', 'token': 'tok-main', 'five': 0.2, 'week': 0.3}
