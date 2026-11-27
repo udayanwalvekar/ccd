@@ -65,10 +65,10 @@ add are kept in the Keychain too (service "ccd"); a token only ever goes into th
 uses it, and ccd never prints one. An account is checked with a 1-token Haiku call, reading the 5-hour and weekly
 limits from the response headers.
 
-Every chat ccd starts in a terminal is watched: ccd stays behind it, and when the chat stops at a usage limit while
-another account has room, ccd closes it and reopens the same chat there, in the same window. `CCD_AUTO=0` switches
-that off, and a chat started with words of its own for claude (`ccd --model x`) is never watched: claude is then
-started the plain way, with nothing behind it.
+Every chat ccd starts in a terminal is watched: ccd stays behind it, and when the chat stops at a usage limit (or
+because Claude Code was switched off for its account) while another account has room, ccd closes it and reopens the
+same chat there, in the same window. `CCD_AUTO=0` switches that off, and a chat started with words of its own for
+claude (`ccd --model x`) is never watched: claude is then started the plain way, with nothing behind it.
 
 Chats start with permission prompts off (claude --dangerously-skip-permissions), so a carried-over chat never sits
 waiting on a question nobody is there to answer.
@@ -80,7 +80,7 @@ import time, tty
 import urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = '1.0.3'
+VERSION = '1.0.4'
 API = 'https://api.anthropic.com/v1/messages'
 PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
                    'system': "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -223,6 +223,8 @@ def ping(acct):
                 why = ''
             acct['error'] = ('its organisation has switched Claude Code off' if why == 'oauth_not_allowed_for_organization'
                              else 'the token was revoked or has run out' if e.code in (401, 403) else 'error %d' % e.code)
+            if why == 'oauth_not_allowed_for_organization':  # the refusal still names the organisation
+                acct['off'], acct['org'] = True, h.get('anthropic-organization-id')
     except Exception:
         acct['error'] = 'no answer (is the internet on?)'
         return acct
@@ -266,10 +268,13 @@ def login_org():
 def settle(accts):
     """After the checks: an expired login that belongs to the same organisation as an added account that answered
     is that account under its other name (the login is often the last account signed in to): shown once, not twice.
-    (Two people in one team share an organisation too; their login would then wait until it is renewed.)"""
+    (Two people in one team share an organisation too; their login would then wait until it is renewed.)
+    The same for an added account whose organisation has switched Claude Code off: the login could not go on either,
+    and a chat moved off that account must not be moved onto it under its other name."""
     me = next((a for a in accts if a.get('unchecked')), None)
     org = me and login_org()
-    if org and any(a is not me and 'five' in a and not a.get('unchecked') and a.get('org') == org for a in accts):
+    if org and any(a is not me and a.get('org') == org and ('five' in a and not a.get('unchecked') or a.get('off'))
+                   for a in accts):
         return [a for a in accts if a is not me]
     return accts
 
@@ -429,18 +434,23 @@ PROJECTS = os.path.expanduser('~/.claude/projects')
 LIVE = os.path.expanduser('~/.claude/sessions')  # one <pid>.json per chat open in a window right now
 RECENT = 48 * 3600  # chats untouched for longer are not listed (`ccdr <id>` still reaches them)
 TAIL = 1 << 20  # only the end of a chat file is read: they grow past 100 MB
-NUDGE = ('Carry on from where you stopped. Your last turn was cut off by a usage limit, and this chat has now been '
+NUDGE = ('Carry on from where you stopped. Your last turn was cut off because its account could not go on (a usage '
+         'limit, or Claude Code switched off for that account), and this chat has now been '
          'reopened on a different account with the same history. If my last message was never answered, answer it '
          'now. Anything that was still running at that moment (background helpers, background commands, timers) '
          'has ended: use the results that had already come back, check on the rest, and restart only what had '
          'not finished or is still needed (a preview server, for example).')
 # A copy opened while the first window is still up: that window still owns whatever it left running.
-NUDGE_COPY = ('Carry on from where you stopped. Your last turn was cut off by a usage limit. This is a copy of that '
+NUDGE_COPY = ('Carry on from where you stopped. Your last turn was cut off because its account could not go on (a '
+              'usage limit, or Claude Code switched off for that account). This is a copy of that '
               'chat, reopened on a different account with the same history; the first window is still open. If my '
               'last message was never answered, answer it now. Background helpers, commands and timers that were '
               'started before belong to that first window and may still be running there: do not assume they stopped, '
               'and check (their output files, the running processes) before starting any of them a second time.')
 LIMITS = ('usage_limit_reached', 'model_requires_usage_credits')  # the whole account is used up, or one model on it
+# "Your organization has disabled Claude subscription access for Claude Code": that account cannot go on either, so the
+# chat is moved just as at a limit. It came mid-chat on an account that had worked all day (27 Nov 2026).
+OFF = ('oauth_org_not_allowed',)
 
 
 def running(pid, started=None):
@@ -544,7 +554,8 @@ def read_chat(path, any_kind=False, tail=None):
         return None
     if size > (tail or TAIL):
         lines = lines[1:]  # the first piece starts mid-line
-    c = {'id': os.path.basename(path)[:-len('.jsonl')], 'path': path, 'limited': False, 'when': mtime, 'open': None}
+    c = {'id': os.path.basename(path)[:-len('.jsonl')], 'path': path, 'limited': False, 'why': None, 'when': mtime,
+         'open': None}
     ai = custom = last = typed = entry = seen = later = None
     for raw in lines:
         if not raw.strip():
@@ -573,9 +584,11 @@ def read_chat(path, any_kind=False, tail=None):
             if text.strip() and not text.lstrip().startswith('<') and not d.get('isMeta'):
                 typed = text
         elif d.get('isApiErrorMessage'):
-            if d.get('apiError') in LIMITS or (d.get('error') == 'rate_limit'
-                                               and re.search(r'you.ve (hit|reached) your .*limit', text.lower())):
-                c['limited'], c['when'] = True, when_of(d) or mtime
+            if d.get('error') in OFF:
+                c['limited'], c['why'], c['when'] = True, 'off', when_of(d) or mtime
+            elif d.get('apiError') in LIMITS or (d.get('error') == 'rate_limit'
+                                                 and re.search(r'you.ve (hit|reached) your .*limit', text.lower())):
+                c['limited'], c['why'], c['when'] = True, 'limit', when_of(d) or mtime
         elif m.get('model') != '<synthetic>':
             c['limited'] = False  # it answered after the limit: it has carried on since
     if not c['limited']:
@@ -692,7 +705,8 @@ def chat_frame(chs, at, cols, lines, now, top=0):
     out = [[], [('  ✦  ', teal), ('Which chat do you want to carry on?', bold)], []]
     for i, c in enumerate(chs[top:top + n]):
         on = top + i == at
-        note = '   ' + ('stopped at its limit · ' if c['limited'] else '') + ago(now - c['when'])
+        stop = 'stopped: account switched off · ' if c.get('why') == 'off' else 'stopped at its limit · '
+        note = '   ' + (stop if c['limited'] else '') + ago(now - c['when'])
         out.append([('  ❯ ' if on else '    ', teal + ';1'), ('%d  ' % (i + 1), teal if on else ''),
                     (cut(c['title'], max(12, cols - 8 - len(note))), bold if on else ''),
                     (note, warm if c['limited'] else dim)])
@@ -736,7 +750,7 @@ def wait_frame(chat, cols=80):
     if live.get('status') in ('shell', 'busy'):
         out += para('It has something still running. Closing that window stops it.', warm)
     out += [[], [('     c    ', teal), ('open a copy here and leave that window as it is', '')]]
-    if chat.get('limited'):
+    if chat.get('limited') and chat.get('why') != 'off':  # switched off: nothing resets, nothing restarts
         out += para('That window starts again by itself when its limit resets. To stop that, press Esc in that '
                     'window.', dim, '          ')
     out += [[('     Esc  ', teal), ('cancel', '')], [], [('     Waiting for that window to close…', dim)]]
@@ -981,7 +995,7 @@ def watch(pid, account, want, move, stop, stopped_on=None):
             except OSError:  # it had just gone by itself: nothing is reopened
                 move.clear()
                 return
-            move.update(id=sid, to=to, old=account)
+            move.update(id=sid, to=to, old=account, why=fresh.get('why'))
             return
         except Exception:
             continue  # a fault here must never take the chat down
@@ -1079,12 +1093,15 @@ def supervise(args, env, account, want):
         if not to or state['closing']:
             return code
         tidy_terminal(saved)
-        print('ccd: this chat reached its limit on %s. Carrying on, on %s (%s).'
-              % (names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
+        off = move.get('why') == 'off'
+        print('ccd: %s. Carrying on, on %s (%s).'
+              % (('Claude Code is switched off for %s' if off else 'this chat reached its limit on %s')
+                 % names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
         note_move(move['id'], account, to['key'])
         stopped_on[account] = time.time()
-        said = '(ccd moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
-            names.get(account, account), to['label'], time.strftime('%H:%M'))  # claude clears the screen: say it in the chat
+        said = '(ccd moved this chat from %s to %s at %s, because %s.) ' % (
+            names.get(account, account), to['label'], time.strftime('%H:%M'),
+            'Claude Code was switched off for the first' if off else 'the first reached its usage limit')  # claude clears the screen: say it in the chat
         account, env = to['key'], dict(env)
         env['CCD_ACCOUNT'] = account
         if account == 'main':

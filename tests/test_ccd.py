@@ -377,6 +377,17 @@ def limit_hit(ago=0):
             'message': {'role': 'assistant', 'model': '<synthetic>', 'content': [{'type': 'text', 'text': LIMIT_TEXT}]}}
 
 
+OFF_TEXT = ('Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key '
+            'instead, or ask your admin to enable access')
+
+
+def switched_off(ago=0):
+    """The line claude saved on 27 Nov 2026 when an account that had worked all day was refused mid-chat."""
+    return {'type': 'assistant', 'timestamp': stamp(ago), 'isApiErrorMessage': True, 'error': 'oauth_org_not_allowed',
+            'cwd': '/work/here', 'entrypoint': 'cli',
+            'message': {'role': 'assistant', 'model': '<synthetic>', 'content': [{'type': 'text', 'text': OFF_TEXT}]}}
+
+
 WAITING = {'type': 'system', 'subtype': 'informational',
            'content': 'Usage limit reached · continuing automatically at 5pm · esc to cancel'}
 
@@ -436,6 +447,25 @@ class ChatList(Disk):
     def test_a_chat_that_never_hit_a_limit_is_not_marked(self):
         self.chat('aaa', [he_said('make the page'), it_said('done')])
         self.assertFalse(self.found()['aaa']['limited'])
+
+    def test_a_chat_stopped_because_its_account_was_switched_off_is_marked(self):
+        self.chat('aaa', [he_said('make the page'), it_said('working on it'), switched_off()])
+        found = self.found()['aaa']
+        self.assertEqual((found['limited'], found['why']), (True, 'off'))
+
+    def test_a_switched_off_account_is_known_by_its_mark_even_if_the_wording_changes(self):
+        off = switched_off()
+        off['message'] = dict(off['message'], content=[{'type': 'text', 'text': 'Some new wording'}])
+        self.chat('aaa', [he_said('make the page'), off])
+        self.assertTrue(self.found()['aaa']['limited'])
+
+    def test_a_chat_that_carried_on_after_being_switched_off_is_not_marked(self):
+        self.chat('aaa', [he_said('make the page'), switched_off(600), he_said('continue', ago=60), it_said('done', ago=30)])
+        self.assertFalse(self.found()['aaa']['limited'])
+
+    def test_a_usage_limit_says_so(self):
+        self.chat('aaa', [he_said('make the page'), limit_hit()])
+        self.assertEqual(self.found()['aaa']['why'], 'limit')
 
     def test_another_kind_of_error_is_not_a_limit(self):
         oops = dict(limit_hit(), error='server_error', apiError='overloaded')
@@ -709,6 +739,17 @@ class WaitScreen(unittest.TestCase):
 class ChatScreen(unittest.TestCase):
     def text(self, chs, at=0, cols=110, lines=40):
         return [''.join(t for t, _ in line) for line in ccd.chat_frame(chs, at, cols, lines, time.time())]
+
+    def test_a_chat_stopped_by_a_switched_off_account_says_so_not_limit(self):
+        out = '\n'.join(self.text([dict(a_chat('a', True), why='off')]))
+        self.assertIn('stopped: account switched off', out)
+        self.assertNotIn('its limit', out)
+
+    def test_the_wait_screen_promises_no_restart_for_a_switched_off_account(self):
+        live = {'pid': 1, 'name': 'sam-dc', 'status': 'idle'}
+        text = lambda c: ' '.join(' '.join(''.join(t for t, _ in line) for line in ccd.wait_frame(c, 80)).split())
+        self.assertIn('when its limit resets', text(a_chat(live=live)))
+        self.assertNotIn('when its limit resets', text(dict(a_chat(live=live), why='off')))
 
     def test_shows_which_chats_stopped_and_which_are_open(self):
         out = '\n'.join(self.text([a_chat('a', True), a_chat('b', False, live={'pid': 1, 'name': 'n', 'status': 'idle'},
@@ -1027,7 +1068,7 @@ class Watching(unittest.TestCase):
     ULTRA = {'key': 'ultra', 'label': 'Ultra', 'token': 'tok-ultra', 'five': 0.2, 'week': 0.3, 'blocked': False}
 
     def rig(self, looks=40, limited=True, stopped_at=1, status='idle', room=None, cpu=None, chat_after=None,
-            stopped_on=None, sid='chat-1', table='', kill=None):
+            stopped_on=None, sid='chat-1', table='', kill=None, why=None):
         """Run the watcher beside a pretend chat. `status`, `cpu` (percent of a processor in use now) and `room` may be
         functions of the number of looks so far; `stopped_at` = seconds after the window opened that the chat hit
         its limit. Returns (the move it asked for, signals sent, account checks)."""
@@ -1046,7 +1087,7 @@ class Watching(unittest.TestCase):
                 lim = limited(count['looks'], path)  # depends on WHICH chat is read
             else:
                 lim = val(limited) if chat_after is None or count['room'] == 0 else chat_after
-            return {'id': 'x', 'limited': lim, 'when': 1_000_000.0 + stopped_at}
+            return {'id': 'x', 'limited': lim, 'why': why if lim else None, 'when': 1_000_000.0 + stopped_at}
 
         def find_room(account, want=None, avoid=()):
             count['room'] += 1
@@ -1077,6 +1118,11 @@ class Watching(unittest.TestCase):
     def test_a_chat_stopped_at_its_limit_is_closed_and_handed_to_an_account_with_room(self):
         move, sent, _ = self.rig()
         self.assertEqual((move['id'], move['to']['key'], move['old']), ('chat-1', 'ultra', 'team'))
+        self.assertEqual(sent, [(4242, signal.SIGTERM)])
+
+    def test_a_chat_stopped_by_a_switched_off_account_is_moved_too_and_says_why(self):
+        move, sent, _ = self.rig(why='off')
+        self.assertEqual((move['id'], move['to']['key'], move['why']), ('chat-1', 'ultra', 'off'))
         self.assertEqual(sent, [(4242, signal.SIGTERM)])
 
     def test_it_waits_a_moment_after_the_limit_so_he_can_read_the_message(self):
@@ -1292,6 +1338,15 @@ class Behind(unittest.TestCase):
         self.assertEqual((env['CLAUDE_CODE_OAUTH_TOKEN'], env['CCD_ACCOUNT']), ('tok-ultra', 'ultra'))
         self.assertGreater(int(env['CLAUDE_CODE_RESUME_THRESHOLD_MINUTES']), 10 ** 6)  # nobody is there to answer a question
         self.assertIn('Ultra', err)
+
+    def test_a_move_off_a_switched_off_account_says_that_not_limit(self):
+        to = {'key': 'ultra', 'label': 'Ultra', 'token': 'tok-ultra', 'five': 0.2, 'week': 0.3}
+        _, starts, _, err = self.stay([signal.SIGTERM, 0], moves=[{'id': 'chat-1', 'to': to, 'old': 'team', 'why': 'off'},
+                                                                  None])
+        self.assertIn('Claude Code is switched off for team', err)
+        self.assertNotIn('limit', err)
+        self.assertRegex(starts[1][0][4], r'^\(ccd moved this chat from team to Ultra at \d\d:\d\d, because Claude Code was '
+                                          r'switched off for the first\.\) ')
 
     def test_a_move_to_his_own_login_drops_the_token(self):
         to = {'key': 'main', 'label': 'your login', 'token': 'tok-main', 'five': 0.2, 'week': 0.3}
