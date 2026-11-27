@@ -732,6 +732,30 @@ class ReviewFixes(Folders):
             ccd.codex_share(c)
         self.assertTrue(os.path.isdir(os.path.join(c, 'sessions')) and not os.path.islink(os.path.join(c, 'sessions')))
 
+    def test_7_a_share_cut_short_after_its_link_was_made_is_finished(self):
+        b = os.path.join(self.root, 'codex-b')
+        write_chat(b, A)
+        os.rename(os.path.join(b, 'sessions'), os.path.join(b, 'sessions.cx-moving-999999'))
+        os.makedirs(os.path.join(self.main, 'sessions'), exist_ok=True)
+        os.symlink(os.path.join(self.main, 'sessions'), os.path.join(b, 'sessions'))  # the link was made, the move stopped
+        self.assertEqual(ccd.codex_share(b), 1)
+        self.assertFalse(os.path.exists(os.path.join(b, 'sessions.cx-moving-999999')))
+        self.assertTrue(os.path.islink(os.path.join(b, 'sessions')))
+        self.assertTrue([f for f in ccd.codex_files(self.main) if f.endswith(A + '.jsonl')])
+
+    def test_7_a_leftover_that_is_a_link_is_never_merged(self):
+        write_chat(self.main, A)
+        b = os.path.join(self.root, 'codex-b')
+        os.makedirs(b)
+        for name in ('sessions', 'sessions.cx-moving-999999'):  # two cx at once: one renamed the other's new link
+            os.symlink(os.path.join(self.main, 'sessions'), os.path.join(b, name))
+        self.assertEqual(ccd.codex_merge(os.path.join(b, 'sessions.cx-moving-999999'),
+                                         os.path.join(self.main, 'sessions'), b), 0)
+        self.assertEqual(ccd.codex_share(b), 0)
+        self.assertFalse(os.path.lexists(os.path.join(b, 'sessions.cx-moving-999999')))
+        self.assertFalse(os.path.exists(os.path.join(self.main, 'sessions-older-copies')))
+        self.assertTrue([f for f in ccd.codex_files(self.main) if f.endswith(A + '.jsonl')])
+
     def test_8_a_limited_chat_is_not_reopened_on_the_account_it_stopped_on(self):
         b = self.home('b')
         shutil.rmtree(b)

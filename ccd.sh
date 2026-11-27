@@ -1892,11 +1892,14 @@ def codex_share(home):
     moved = 0
     for name in CODEX_CHATS:
         link, there = os.path.join(home, name), os.path.join(CODEX_MAIN, name)
-        if os.path.realpath(home) == os.path.realpath(CODEX_MAIN) or os.path.islink(link):
+        if os.path.realpath(home) == os.path.realpath(CODEX_MAIN):
             continue
         os.makedirs(there, exist_ok=True)
         left = []  # folders a share that was cut short (a crash, two cx at once) left half moved
         for d in glob.glob(glob.escape(link) + '.cx*-moving-*'):
+            if os.path.islink(d):  # a link another cx renamed, not chats: merging it would move the shared ones
+                os.unlink(d)
+                continue
             pid = d.rpartition('-')[2]
             if not (pid.isdigit() and int(pid) != os.getpid() and running(int(pid))):
                 left.append(d)
@@ -1920,6 +1923,8 @@ def codex_merge(old, there, home):
     """Move every file from `old` into the shared folder `there`, then remove `old`. A file that is in both keeps
     its newer copy; the older goes to ~/.codex/sessions-older-copies. Returns how many chats moved."""
     moved = 0
+    if os.path.islink(old):
+        return moved
     for top, _, files in os.walk(old):
         for f in files:
             src = os.path.join(top, f)
