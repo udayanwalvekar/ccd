@@ -12,7 +12,7 @@ another of your accounts by itself when the one it is on runs out.
   ccd remove X    forget an account
   ccd 200 / 100   only accounts on that plan ($ a month)
   ccd update      get the newest ccd (your accounts stay)
-  cxd             the same for Codex: cxd, cxdm, cxdr, cxd add, cxd accounts (cxd help)
+  cx              the same for Codex: cx, cxm, cxr, cx add, cx accounts (cx help)
 
 Your usual Claude Code login needs no setup: ccd reads it from the macOS Keychain and never refreshes it. Accounts you
 add are kept in the Keychain too (service "ccd"); a token only ever goes into the environment of the one chat that
@@ -679,7 +679,7 @@ def waiting(key, is_open):
     return None if is_open else 'same'
 
 
-def wait_frame(chat, cols=80):
+def wait_frame(chat, cols=80, who='claude'):
     """Shown when the chat he picked is still open in another window: two windows must not write one chat.
     Wrapped to the window, so no instruction is ever cut short."""
     teal, warm, dim, bold = colour(STOPS[0]), colour(STOPS[4]), '2', '1'
@@ -691,12 +691,13 @@ def wait_frame(chat, cols=80):
         return [[(lead + line, style)] for line in textwrap.wrap(text, max(20, width - len(lead)))]
 
     out = [[], [('  ✦  ', teal), ('“%s”' % cut(chat['title'], max(12, width - 7 - len(end))), bold), (end, '')], []]
-    out += para('A chat can only run in one place at a time. Close it there (Esc, then Ctrl-C twice) and it carries '
-                'on here by itself.')
+    keys = '/quit, or Ctrl-C twice' if who == 'codex' else 'Esc, then Ctrl-C twice'
+    out += para('A chat can only run in one place at a time. Close it there (%s) and it carries on here by itself.'
+                % keys)
     if live.get('status') in ('shell', 'busy'):
         out += para('It has something still running. Closing that window stops it.', warm)
     out += [[], [('     c    ', teal), ('open a copy here and leave that window as it is', '')]]
-    if chat.get('limited'):
+    if chat.get('limited') and who == 'claude':
         out += para('That window starts again by itself when its limit resets. To stop that, press Esc in that '
                     'window.', dim, '          ')
     out += [[('     Esc  ', teal), ('cancel', '')], [], [('     Waiting for that window to close…', dim)]]
@@ -1138,12 +1139,12 @@ class Menu:
             if act:
                 return chs[at] if act == 'go' else None
 
-    def wait(self, chat, still_open):
+    def wait(self, chat, still_open, who='claude'):
         """The chat is open in another window: 'same' once that window closes, 'copy' if he presses c,
         None if he backs out."""
         termios.tcflush(self.fd, termios.TCIFLUSH)
         while True:
-            self.show(wait_frame(chat, os.get_terminal_size(self.fd).columns))
+            self.show(wait_frame(chat, os.get_terminal_size(self.fd).columns, who))
             act = waiting(self.key(0.5), still_open())
             if act:
                 return None if act == 'quit' else act
@@ -1535,7 +1536,7 @@ def add_here(ask, name='', plan=None):
 def usage_lines(accts, cols, me='ccd'):
     teal, dim, warm = colour(STOPS[0]), '2', colour((251, 191, 36))
     width = max(10, min(28, cols - 44))
-    out = [[], [('  ✦  ', teal), ('Your %s accounts' % ('Codex' if me == 'cxd' else 'Claude'), '1')], []]
+    out = [[], [('  ✦  ', teal), ('Your %s accounts' % ('Codex' if me == 'cx' else 'Claude'), '1')], []]
     rws = rows(accts)
     best = max((i for i, r in enumerate(rws) if not r['blocked']), key=lambda i: room(rws[i]), default=None)
     for i, r in enumerate(rws):
@@ -1609,7 +1610,7 @@ def how_to(cols):
             [('  ', ''), ('ccdr', sky + ';1'), ('           reopen a chat on another account  (r = resume)', dim)],
             [('  ', ''), ('ccd accounts', sky + ';1'), ('   every account and how much is left', dim)],
             [('  ', ''), ('ccd add', sky + ';1'), ('        add another account', dim)],
-            [('  ', ''), ('cxd', sky + ';1'), ('            the same for Codex: cxdm, cxdr, cxd add', dim)], []]
+            [('  ', ''), ('cx', sky + ';1'), ('             the same for Codex: cxm, cxr, cx add', dim)], []]
 
 
 def cmd_setup(args):
@@ -1646,14 +1647,14 @@ def cmd_setup(args):
                 add_here(ask)
             except KeyboardInterrupt:
                 ask.say([[]])
-        if CODEX:  # Codex too: cxd
+        if CODEX:  # Codex too: cx
             ask.say([[], [('  ✓ ', teal), ('Codex found', '')]]
                     + ([[('  ✓ ', teal), ('Your Codex login', '')]] if os.path.isdir(CODEX_MAIN) else [])
                     + [[('  ✓ ', teal), (label, '')] for _, label, _ in codex_added()] + [[]])
             first = True
             while True:
                 q = 'Add another Codex account now?' if first else 'Add one more?'
-                a = ask.choose(q, [('Add one', 'you sign in to it in the browser'), ('Not now', 'cxd add, any time')],
+                a = ask.choose(q, [('Add one', 'you sign in to it in the browser'), ('Not now', 'cx add, any time')],
                                at=0 if first else 1)
                 first = False
                 if a != 0:
@@ -1705,7 +1706,7 @@ def cmd_uninstall(args):
         pass
     me = os.path.realpath(sys.argv[0])
     for d in os.environ.get('PATH', '').split(':') + [os.path.expanduser('~/.local/bin')]:
-        for n in ('ccd', 'ccdm', 'ccdr', 'cxd', 'cxdm', 'cxdr'):
+        for n in ('ccd', 'ccdm', 'ccdr', 'cx', 'cxm', 'cxr'):
             p = os.path.join(d, n)
             if os.path.islink(p) and os.path.realpath(p) == me:
                 os.unlink(p)
@@ -1755,45 +1756,49 @@ def cmd_update(args):
 
 
 def cmd_version(args):
-    print('%s %s' % ('cxd' if os.path.basename(sys.argv[0] if sys.argv else '') in ('cxd', 'cxdm', 'cxdr') else 'ccd', VERSION))
+    print('%s %s' % ('cx' if os.path.basename(sys.argv[0] if sys.argv else '') in ('cx', 'cxm', 'cxr') else 'ccd', VERSION))
     return 0
 
 
-# ---- cxd: the same for Codex ----------------------------------------------------------------------------------
+# ---- cx: the same for Codex ----------------------------------------------------------------------------------
 # Codex keeps a login in a folder (CODEX_HOME), not in a token it can be handed, so a Codex account is a folder:
-# ~/.codex is the usual one and `cxd add` makes ~/.codex-<name> for each other one. A chat stays in the folder of
-# the account it ran on; cxdr copies it into the folder of the account it carries on with.
-CXD_DOC = """cxd = Codex, dangerously: ccd for Codex (every chat starts as codex --dangerously-bypass-approvals-and-sandbox).
+# ~/.codex is the usual one and `cx add` makes ~/.codex-<name> for each other one. A chat stays in the folder of
+# the account it ran on; cxr copies it into the folder of the account it carries on with.
+CX_DOC = """cx = ccd for Codex: every chat starts in yolo (codex --dangerously-bypass-approvals-and-sandbox).
 
-cxd: start Codex on whichever of your Codex accounts has the most room left, and carry a chat over to another of your
+cx: start Codex on whichever of your Codex accounts has the most room left, and carry a chat over to another of your
 accounts by itself when the one it is on runs out.
 
-  cxd             start a chat on the account with the most room
-  cxdm            choose the account from a list first (m = manual)
-  cxdr            reopen a chat on another account, e.g. one that stopped at its limit (r = resume)
-  cxd add         add another of your Codex accounts (its own folder, ~/.codex-<name>, signed in in the browser)
-  cxd accounts    every Codex account with its 5-hour and weekly limits
-  cxd remove X    forget an account (its folder and chats stay)
-  cxd 200 / 100   only accounts on that plan ($ a month)
+  cx              start a chat on the account with the most room
+  cxm             choose the account from a list first (m = manual)
+  cxr             reopen a chat on another account, e.g. one that stopped at its limit (r = resume)
+  cx add          add another of your Codex accounts (its own folder, ~/.codex-<name>, signed in in the browser)
+  cx accounts     every Codex account with its 5-hour and weekly limits
+  cx remove X     forget an account (its folder and chats stay)
+  cx 200 / 100    only accounts on that plan ($ a month)
 
 Your usual Codex login (~/.codex) needs no setup. An added account's folder links config.toml, AGENTS.md, rules,
 skills and its chats (sessions) to ~/.codex, so every account works the same and every chat can be reopened on any
-account, by cxd or by plain `codex resume`. Limits are read from Codex itself (codex app-server, in that
+account, by cx or by plain `codex resume`. Limits are read from Codex itself (codex app-server, in that
 account's folder): ccd never reads or moves a Codex token.
 
-Every chat cxd starts in a terminal is watched, as ccd watches Claude chats: when it stops at a usage limit while
-another account has room, cxd closes it and reopens the same chat there, in the same window. `CCD_AUTO=0` switches
+Every chat cx starts in a terminal is watched, as ccd watches Claude chats: when it stops at a usage limit while
+another account has room, cx closes it and reopens the same chat there, in the same window. `CCD_AUTO=0` switches
 that off, and a chat started with words of its own for codex is never watched.
 Settings: ~/.config/ccd/config.json ("codex_args": the words every chat starts with, [] for Codex's own approvals).
-Your own approval or sandbox words (--sandbox, --ask-for-approval, --full-auto) replace the default for that chat."""
-CODEX_MAIN = os.path.expanduser('~/.codex')
+Your own approval or sandbox words (--sandbox, --ask-for-approval, --approve-for-me) replace the default for that chat."""
+CODEX_MAIN = os.path.expanduser(os.environ.get('CCD_CODEX_MAIN') or os.environ.get('CODEX_HOME') or '~/.codex')
 CODEX_SHARED = ('config.toml', 'AGENTS.md', 'rules', 'skills')  # a new account's folder links these to ~/.codex
 CODEX_CHATS = ('sessions', 'archived_sessions')  # every account's folder links these to ~/.codex: one set of chats
 CODEX_SKIP_PROMPTS = ['--dangerously-bypass-approvals-and-sandbox']
-CODEX_MODES = ('--sandbox', '-s', '--ask-for-approval', '-a', '--full-auto', '--yolo',
+CODEX_MODES = ('--sandbox', '-s', '--ask-for-approval', '-a', '--approve-for-me', '--full-auto', '--yolo',
                '--dangerously-bypass-approvals-and-sandbox')
 CODEX_LIMIT = 'usage_limit_exceeded'  # what Codex writes into the chat when the account is used up
 CODEX_PLANS = {'plus': 20, 'prolite': 100, 'pro': 200}  # ChatGPT's plan names -> $ a month
+CODEX_SHELLS = ('sh', 'bash', 'zsh', 'dash', 'fish')  # what Codex runs its commands in
+CODEX_BUSY_MAX = 3600  # a command still working after an hour no longer holds the move
+CODEX_RAN_ON = os.path.join(os.path.dirname(MOVES), 'codex-chats.log')  # chat id -> the account it last ran on
+CODEX_MOVING = os.path.join(os.path.dirname(MOVES), 'codex-moving')  # <chat id>: the cx moving it, while no window has it
 
 
 def find_codex():
@@ -1818,7 +1823,7 @@ def codex_flags(d, words):
 
 
 def codex_added():
-    """The Codex accounts added with `cxd add`: [(key, label, folder)]."""
+    """The Codex accounts added with `cx add`: [(key, label, folder)]."""
     out = []
     for a in settings().get('codex_accounts') or []:
         if isinstance(a, dict) and all(isinstance(a.get(k), str) and a.get(k) for k in ('key', 'label', 'home')):
@@ -1843,34 +1848,51 @@ def codex_share(home):
         if os.path.realpath(home) == os.path.realpath(CODEX_MAIN) or os.path.islink(link):
             continue
         os.makedirs(there, exist_ok=True)
-        if not os.path.lexists(link):
-            os.symlink(there, link)
-            continue
-        if not os.path.isdir(link):
-            continue
-        old = '%s.cxd-moving-%d' % (link, os.getpid())
-        os.rename(link, old)  # then the link straight away: a Codex starting a chat now finds the shared folder
-        os.symlink(there, link)
-        for top, _, files in os.walk(old):
-            for f in files:
-                src = os.path.join(top, f)
-                dst = os.path.join(there, os.path.relpath(src, old))
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                if os.path.lexists(dst):
-                    newer, older = (src, dst) if os.path.getmtime(src) > os.path.getmtime(dst) else (dst, src)
-                    keep = os.path.join(CODEX_MAIN, 'sessions-older-copies', os.path.basename(home), os.path.relpath(src, old))
-                    os.makedirs(os.path.dirname(keep), exist_ok=True)
-                    os.rename(older, keep)
-                    if newer == src:
-                        os.rename(src, dst)
-                else:
-                    os.rename(src, dst)
-                moved += f.endswith('.jsonl')
-        for top, dirs, files in os.walk(old, topdown=False):
+        left = []  # folders a share that was cut short (a crash, two cx at once) left half moved
+        for d in glob.glob(glob.escape(link) + '.cx*-moving-*'):
+            pid = d.rpartition('-')[2]
+            if not (pid.isdigit() and int(pid) != os.getpid() and running(int(pid))):
+                left.append(d)
+        if os.path.lexists(link) and not os.path.islink(link) and os.path.isdir(link):
+            old = '%s.cx-moving-%d' % (link, os.getpid())
+            os.rename(link, old)  # then the link straight away: a Codex starting a chat now finds the shared folder
             try:
-                os.rmdir(top)
+                os.symlink(there, link)
             except OSError:
-                pass
+                os.rename(old, link)
+                raise
+            left.append(old)
+        elif not os.path.lexists(link):
+            os.symlink(there, link)
+        for old in left:
+            moved += codex_merge(old, there, home)
+    return moved
+
+
+def codex_merge(old, there, home):
+    """Move every file from `old` into the shared folder `there`, then remove `old`. A file that is in both keeps
+    its newer copy; the older goes to ~/.codex/sessions-older-copies. Returns how many chats moved."""
+    moved = 0
+    for top, _, files in os.walk(old):
+        for f in files:
+            src = os.path.join(top, f)
+            dst = os.path.join(there, os.path.relpath(src, old))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.lexists(dst):
+                newer, older = (src, dst) if os.path.getmtime(src) > os.path.getmtime(dst) else (dst, src)
+                keep = os.path.join(CODEX_MAIN, 'sessions-older-copies', os.path.basename(home), os.path.relpath(src, old))
+                os.makedirs(os.path.dirname(keep), exist_ok=True)
+                shutil.move(older, keep)
+                if newer == src:
+                    shutil.move(src, dst)
+            else:
+                shutil.move(src, dst)  # a rename on one disk, so a Codex writing it carries on; else a copy
+            moved += f.endswith('.jsonl')
+    for top, dirs, files in os.walk(old, topdown=False):
+        try:
+            os.rmdir(top)
+        except OSError:
+            pass
     return moved
 
 
@@ -1879,7 +1901,7 @@ def codex_env(home):
     chat files they point at are shared, and Codex finds a chat from another account by its file. (Pointing every
     account at one set of databases splits a queued message from the chat it is for: `codex queue` goes through
     the account's own background server, which keeps its own databases.)"""
-    return dict(os.environ, CODEX_HOME=home)
+    return dict(os.environ, CODEX_HOME=home, CCD_CODEX_MAIN=CODEX_MAIN)
 
 
 def codex_share_all():
@@ -1888,10 +1910,10 @@ def codex_share_all():
         try:
             n = codex_share(home) if os.path.isdir(home) else 0
         except OSError as e:
-            print('cxd: could not share the chats of %s with your other accounts (%s)' % (label, e), file=sys.stderr)
+            print('cx: could not share the chats of %s with your other accounts (%s)' % (label, e), file=sys.stderr)
             continue
         if n:
-            print('cxd: moved %d chats of %s into ~/.codex/sessions, so every account sees them' % (n, label),
+            print('cx: moved %d chats of %s into ~/.codex/sessions, so every account sees them' % (n, label),
                   file=sys.stderr)
 
 
@@ -1901,7 +1923,8 @@ def codex_ask(home, methods, timeout=20):
     p = subprocess.Popen([CODEX, 'app-server'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, env=dict(os.environ, CODEX_HOME=home))
     asked = dict(enumerate(methods, 2))
-    said = [{'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'ccd', 'version': VERSION}}},
+    said = [{'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'ccd', 'version': VERSION},
+                                                          'capabilities': {'experimentalApi': True}}},
             {'method': 'initialized'}] + [{'id': n, 'method': m, 'params': {}} for n, m in asked.items()]
     got, buf, end = {}, b'', time.time() + timeout
     try:
@@ -1950,10 +1973,10 @@ def codex_ping(acct):
         return acct
     if not me.get('account'):
         acct['error'] = 'not signed in: ' + ('run codex once and sign in' if acct['key'] == 'main'
-                                             else 'cxd add %s signs it in again' % acct['label'])
+                                             else 'cx add %s signs it in again' % acct['label'])
         return acct
     acct['plan'] = CODEX_PLANS.get(me['account'].get('planType'))
-    workspace = (me.get('workspaceRouting') or {}).get('chatgptAccountId')
+    workspace = (me.get('workspaceRouting') or {}).get('chatgptAccountId') or me['account'].get('email')
     if me.get('userId') and workspace:  # one person's own limits: their user and the ChatGPT account they work in
         acct['org'] = '%s/%s' % (me['userId'], workspace)
     limits = (got.get('account/rateLimits/read') or {}).get('rateLimits') or {}
@@ -1961,10 +1984,16 @@ def codex_ping(acct):
         acct['error'] = 'codex did not say how much is left'
         return acct
     acct.update(five=0.0, week=0.0, five_reset=0, week_reset=0, only_week=True)
-    for w in (limits.get('primary'), limits.get('secondary')):
+    filled = set()
+    for place, w in (('five', limits.get('primary')), ('week', limits.get('secondary'))):
         if not isinstance(w, dict):
             continue
-        which = 'five' if (w.get('windowDurationMins') or 0) <= 1440 else 'week'  # some plans have only a weekly one
+        mins = w.get('windowDurationMins')
+        which = place if not isinstance(mins, (int, float)) else 'five' if mins <= 1440 else 'week'
+        if which in filled:  # never two windows in one slot: the fuller one counts
+            if float(w.get('usedPercent') or 0) / 100 <= acct[which]:
+                continue
+        filled.add(which)
         acct['only_week'] = acct['only_week'] and which == 'week'
         reset = w.get('resetsAt') or 0
         used = 0.0 if reset and reset <= time.time() else min(max(float(w.get('usedPercent') or 0) / 100, 0.0), 1.0)
@@ -2011,13 +2040,31 @@ def codex_events(lines):
     return out
 
 
+def codex_meta(path):
+    """The first line of a Codex chat file (session_meta), or {}."""
+    try:
+        with open(path, 'rb') as f:
+            m = json.loads(f.readline(1 << 20))
+        return dict(m.get('payload') or {}, timestamp=(m.get('payload') or {}).get('timestamp') or m.get('timestamp'))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def codex_own(meta):
+    """Is this a chat he had in the terminal? Not a `codex exec` run, nor a sub-agent's thread (which also says
+    codex-tui, and runs in the same window)."""
+    src = meta.get('source')
+    return (meta.get('originator') == 'codex-tui' and isinstance(meta.get('id'), str)
+            and not (isinstance(src, dict) and 'subagent' in src) and not meta.get('parent_thread_id'))
+
+
 def read_codex_chat(path, acct):
     """One Codex chat, shaped like a ccdr chat; None if it is not one he had in the terminal (a `codex exec` run,
     or a helper Codex started by itself)."""
     try:
         with open(path, 'rb') as f:
             meta = json.loads(f.readline(1 << 20)).get('payload') or {}
-            if meta.get('originator') != 'codex-tui' or not isinstance(meta.get('id'), str):
+            if not codex_own(meta):
                 return None
             head = f.read(1 << 18).split(b'\n')
             size = os.fstat(f.fileno()).st_size
@@ -2033,18 +2080,65 @@ def read_codex_chat(path, acct):
     return {'id': meta['id'], 'title': title, 'said': said[-1] if said else None, 'when': when,
             'cwd': meta.get('cwd') if isinstance(meta.get('cwd'), str) else None,
             'limited': bool(last and last[-1] == ('stop', True)), 'account': acct['key'], 'home': acct['home'],
-            'path': path, 'open': None}
+            'path': path, 'open': None, 'creator': '%s/%s' % (meta.get('creator_user_id'), meta.get('creator_account_id'))
+            if meta.get('creator_user_id') and meta.get('creator_account_id') else None}
 
 
 def codex_open_files():
-    """The chat files Codex windows have open right now (Codex keeps a chat's file open while it is up); None if
-    that can't be seen."""
+    """The chat files Codex windows have open right now, with the process that holds each (Codex keeps a chat's
+    file open while it is up): {path: pid}; None if that can't be seen."""
     try:
-        out = subprocess.run(['/usr/sbin/lsof', '-w', '-Fn', '-c', 'codex'], capture_output=True, text=True,
+        out = subprocess.run(['/usr/sbin/lsof', '-w', '-Fpn', '-c', 'codex'], capture_output=True, text=True,
                              timeout=10).stdout
     except Exception:
         return None
-    return {os.path.realpath(l[1:]) for l in out.splitlines() if l.startswith('n') and l.endswith('.jsonl')}
+    held, pid = {}, None
+    for l in out.splitlines():
+        if l.startswith('p') and l[1:].isdigit():
+            pid = int(l[1:])
+        elif l.startswith('n') and l.endswith('.jsonl'):
+            held[os.path.realpath(l[1:])] = pid
+    return held
+
+
+def codex_moving(sid, boss=None, done=False):
+    """Between closing a chat's window and reopening it, the cx moving it leaves its number here, so cxr waits.
+    With no boss: is a live cx moving that chat now?"""
+    mark = os.path.join(CODEX_MOVING, sid)
+    try:
+        if done:
+            os.unlink(mark)
+        elif boss:
+            os.makedirs(CODEX_MOVING, exist_ok=True)
+            with open(mark, 'w') as f:
+                f.write(str(boss))
+        else:
+            with open(mark) as f:
+                pid = f.read().strip()
+            return pid.isdigit() and int(pid) != os.getpid() and running(int(pid))
+    except OSError:
+        pass
+    return False
+
+
+def codex_ran_on(sid=None, key=None):
+    """Note that chat `sid` now runs on account `key`; or, with no key, the account it last ran on (or None)."""
+    try:
+        if key:
+            os.makedirs(os.path.dirname(CODEX_RAN_ON), exist_ok=True)
+            with open(CODEX_RAN_ON, 'a') as f:
+                f.write('%s %s\n' % (sid, key))
+            if os.path.getsize(CODEX_RAN_ON) > 1 << 20:  # keep the newest half
+                with open(CODEX_RAN_ON) as f:
+                    lines = f.readlines()
+                with open(CODEX_RAN_ON, 'w') as f:
+                    f.writelines(lines[len(lines) // 2:])
+            return key
+        with open(CODEX_RAN_ON) as f:
+            last = [l.split()[1] for l in f if l.split()[:1] == [sid] and len(l.split()) == 2]
+        return last[-1] if last else None
+    except OSError:
+        return None
 
 
 def codex_chats(now=None, sid=None):
@@ -2068,8 +2162,8 @@ def codex_chats(now=None, sid=None):
             except OSError:
                 continue
             c = read_codex_chat(path, acct)
-            if c and shared:
-                c['account'] = None  # shared chats don't say which account they last ran on
+            if c and shared:  # a shared chat's file doesn't say which account it last ran on: cx notes it
+                c['account'] = codex_ran_on(c['id'])
             if c and sid and c['id'] != sid:
                 continue
             if c and (c['id'] not in best or c['when'] > best[c['id']]['when']):
@@ -2082,19 +2176,19 @@ def codex_chats(now=None, sid=None):
 
 
 def codex_carry_chat(given):
-    """`cxdr`: the chat he wants carried on: the one with this id, or his pick from the list. Exits if none."""
+    """`cxr`: the chat he wants carried on: the one with this id, or his pick from the list. Exits if none."""
     if given:
         found = codex_chats(sid=given) if re.fullmatch(r'[A-Za-z0-9_-]+', given) else []
         if not found:
-            sys.exit('cxdr: no Codex chat with the id %s on this Mac. Nothing started.' % given)
+            sys.exit('cxr: no Codex chat with the id %s on this Mac. Nothing started.' % given)
         return found[0]
     found = codex_chats()
     if not found:
-        sys.exit('cxdr: no Codex chat from the last two days to carry on. Nothing started.')
+        sys.exit('cxr: no Codex chat from the last two days to carry on. Nothing started.')
     try:
         menu = Menu('Looking at your chats…')
     except (OSError, termios.error):
-        sys.exit("cxdr: no terminal to ask in. Nothing started. Give the chat's id: cxdr <id>")
+        sys.exit("cxr: no terminal to ask in. Nothing started. Give the chat's id: cxr <id>")
     try:
         chat = menu.choose_chat(found)
     except KeyboardInterrupt:
@@ -2113,10 +2207,10 @@ def codex_copy(path, home_from, home_to):
     if os.path.realpath(os.path.dirname(path)) == os.path.realpath(os.path.dirname(there)):
         return path  # the accounts share their chats: nothing to copy
     if os.environ.get('CCD_DRY_RUN'):
-        print('cxdr: dry run, would copy the chat to %s' % there, file=sys.stderr)
+        print('cxr: dry run, would copy the chat to %s' % there, file=sys.stderr)
         return there
     os.makedirs(os.path.dirname(there), exist_ok=True)
-    part = os.path.join(os.path.dirname(there), '.cxd-copy-%d' % os.getpid())
+    part = os.path.join(os.path.dirname(there), '.cx-copy-%d' % os.getpid())
     try:
         shutil.copy2(path, part)
         os.replace(part, there)
@@ -2143,24 +2237,32 @@ def codex_carry_words(chat, home, extra):
     While it is still open in a window: the same wait screen as ccdr (c opens a copy). Exits if he backs out."""
     there = os.path.join(home, os.path.relpath(chat['path'], chat['home']))
     mine = {os.path.realpath(chat['path']), os.path.realpath(there)}
+    bosses = set()
 
     def still_open():
         live = codex_open_files()
-        return live is None or bool(mine & live)  # can't see: count it as open
+        if live is None:
+            return True  # can't see: count it as open
+        for path, pid in live.items():  # the cx behind that window may close it and reopen it by itself
+            if path in mine and pid:
+                boss = behind_of(pid)
+                if boss and boss != os.getpid():
+                    bosses.add(boss)
+        return bool(mine & set(live)) or any(running(b) for b in bosses) or codex_moving(chat['id'])
     copy = False
     if still_open():
         chat['open'] = chat.get('open') or {'name': None}
         if os.environ.get('CCD_DRY_RUN'):
-            print('cxd: dry run, that chat is still open in another window; a real run waits for it to close',
+            print('cx: dry run, that chat is still open in another window; a real run waits for it to close',
                   file=sys.stderr)
         else:
             try:
                 menu = Menu('Looking at your chats…')
             except (OSError, termios.error):
-                sys.exit('cxdr: that chat is still open in another window and there is no terminal to ask in. '
+                sys.exit('cxr: that chat is still open in another window and there is no terminal to ask in. '
                          'Close that window, then try again. Nothing started.')
             try:
-                how = menu.wait(chat, still_open)
+                how = menu.wait(chat, still_open, who='codex')
             except KeyboardInterrupt:
                 how = None
             finally:
@@ -2173,23 +2275,23 @@ def codex_carry_words(chat, home, extra):
     codex_copy(chat['path'], chat['home'], home)
     if chat.get('cwd') and os.path.isdir(chat['cwd']):
         os.chdir(chat['cwd'])  # codex reopens a chat in the folder it is started in
-    print('cxdr: carrying on “%s”%s' % (cut(chat['title'], 58), ' as a copy' if copy else ''), file=sys.stderr)
+    print('cxr: carrying on “%s”%s' % (cut(chat['title'], 58), ' as a copy' if copy else ''), file=sys.stderr)
     if copy or extra or not chat['limited']:  # a copy is a new chat: its note waits in the box for Enter
         note = [NUDGE_COPY] if copy and chat['limited'] and not extra else []
         return ['fork' if copy else 'resume', chat['id']] + (extra or note)
     if codex_queue(home, chat['id'], NUDGE):
         return ['resume', chat['id']]
-    print('cxdr: the carry-on note is typed in the box; press Enter to send it', file=sys.stderr)
+    print('cxr: the carry-on note is typed in the box; press Enter to send it', file=sys.stderr)
     return ['resume', chat['id'], NUDGE]
 
 
-def cxd_main(called, args):
-    """cxd, cxdm and cxdr: start Codex on the account with the most room, or the one he chooses."""
+def cx_main(called, args):
+    """cx, cxm and cxr: start Codex on the account with the most room, or the one he chooses."""
     if not CODEX:
-        sys.exit('cxd: Codex is not installed: https://developers.openai.com/codex/cli')
+        sys.exit('cx: Codex is not installed: https://developers.openai.com/codex/cli')
     codex_share_all()
-    manual, carry, chat = called == 'cxdm', called == 'cxdr', None
-    plan = lambda: int(args.pop(0)) if args and args[0] in ('100', '200') else None  # `cxd 200` = $200 plans only
+    manual, carry, chat = called in ('cxm', 'cxr'), called == 'cxr', None
+    plan = lambda: int(args.pop(0)) if args and args[0] in ('100', '200') else None  # `cx 200` = $200 plans only
     want = plan()
     if carry:
         chat = codex_carry_chat(args.pop(0) if args and not args[0].startswith('-') else None)
@@ -2200,7 +2302,7 @@ def cxd_main(called, args):
         try:
             menu = Menu('Checking your Codex accounts…')
         except (OSError, termios.error):
-            print('cxdm: no terminal to ask in; picking the account with the most room', file=sys.stderr)
+            print('cxm: no terminal to ask in; picking the account with the most room', file=sys.stderr)
     checking = True
     try:
         accts = codex_check(accts, menu)
@@ -2210,7 +2312,8 @@ def cxd_main(called, args):
         ok = [a for a in accts if 'five' in a and not a['blocked']]
         if chat and chat['limited']:  # not back onto the account it stopped on while another has room
             was = next((a for a in accts if a['key'] == chat['account']), {})
-            ok = [a for a in ok if a['key'] != chat['account'] and not (a.get('org') and a.get('org') == was.get('org'))] or ok
+            orgs = {o for o in (was.get('org'), None if chat['account'] else chat.get('creator')) if o}
+            ok = [a for a in ok if a['key'] != chat['account'] and a.get('org') not in orgs] or ok
         if menu and ok:
             pick = menu.choose(rows(accts))
             if pick is None:
@@ -2226,7 +2329,7 @@ def cxd_main(called, args):
         if menu:
             menu.close()
     if want and not accts:
-        sys.exit('%s: no $%d Codex account is set up on this Mac (cxd add)' % (called, want))
+        sys.exit('%s: no $%d Codex account is set up on this Mac (cx add)' % (called, want))
     if (menu or carry) and not ok:
         if not rows(accts):
             sys.exit('%s: could not check any Codex account (%s). Nothing started.'
@@ -2238,30 +2341,31 @@ def cxd_main(called, args):
             print('  %s%s' % (a['label'], ': ' + back if back else ''), file=sys.stderr)
         sys.exit(1)
     if want and not ok:
-        sys.exit('cxd: no $%d Codex account has room right now (checked: %s)' % (want, ', '.join(a['label'] for a in accts)))
+        sys.exit('cx: no $%d Codex account has room right now (checked: %s)' % (want, ', '.join(a['label'] for a in accts)))
     if ok and pick is None:
         top = max(room(a) for a in ok)
         pick = random.choice([a for a in ok if room(a) >= top - 0.02])
     if pick:
-        print('cxd: using %s (%s)' % (pick['label'], how_full(pick)), file=sys.stderr)
+        print('cx: using %s (%s)' % (pick['label'], how_full(pick)), file=sys.stderr)
     elif any('five' in a for a in accts):
-        print('cxd: every Codex account is at its limit; starting with your usual login', file=sys.stderr)
+        print('cx: every Codex account is at its limit; starting with your usual login', file=sys.stderr)
     home = pick['home'] if pick else CODEX_MAIN
     if carry:
         args = codex_carry_words(chat, home, args)
     words = codex_flags(settings(), args) + args
     if os.environ.get('CCD_DRY_RUN'):
-        print('cxd: dry run, would start in %s: codex %s' % (home, ' '.join(w for w in words if w != NUDGE)
+        print('cx: dry run, would start in %s: codex %s' % (home, ' '.join(w for w in words if w != NUDGE)
                                                              + (' + the carry-on note' if NUDGE in words else '')),
               file=sys.stderr)
         return 0
     env = codex_env(home)
     if auto_on() and not own_words:  # stay behind the chat, to carry it on if it stops at a limit
-        sys.exit(codex_supervise(args, env, pick['key'] if pick else 'main', want, chat and chat['id']))
+        known = chat['id'] if chat and args[:1] == ['resume'] else None  # a fork is a new chat, found by itself
+        sys.exit(codex_supervise(args, env, pick['key'] if pick else 'main', want, known))
     os.execve(CODEX, [CODEX] + words, env)
 
 
-# ---- cxd's automatic move: the same as ccd's, for a Codex chat ----------------------------------------------
+# ---- cx's automatic move: the same as ccd's, for a Codex chat ----------------------------------------------
 def codex_when(stamp):
     try:
         return datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
@@ -2299,9 +2403,50 @@ def codex_state(path):
     return {'id': meta.get('id'), 'limited': limited, 'when': when, 'said': said}
 
 
+def codex_ps_table():
+    """Every process: its number, its parent's, its processor use and its program; None if it can't be read."""
+    try:
+        done = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,%cpu=,comm='], capture_output=True, text=True,
+                              timeout=5, env={'LC_ALL': 'C'})
+        return done.stdout if done.returncode == 0 and done.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def codex_shell_load(table, root):
+    """Percent of a processor in use by the commands Codex runs (each in a shell), not by the servers and helpers
+    it keeps beside the chat (MCP servers, a browser), nor by what those run."""
+    kids, load, prog = {}, {}, {}
+    for line in table.splitlines():
+        f = line.split(None, 3)
+        if len(f) != 4 or not (f[0].isdigit() and f[1].isdigit()):
+            continue
+        try:
+            load[int(f[0])] = float(f[2].replace(',', '.'))
+        except ValueError:
+            continue
+        kids.setdefault(int(f[1]), []).append(int(f[0]))
+        prog[int(f[0])] = os.path.basename(f[3].strip()).lstrip('-')
+    total, todo, seen = 0.0, [(k, False) for k in kids.get(root, [])], set()
+    while todo:
+        pid, under = todo.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        under = under or prog.get(pid) in CODEX_SHELLS
+        if not under and not prog.get(pid, '').startswith('codex'):
+            continue  # a server or helper, and whatever it runs itself
+        if under:
+            total += load.get(pid, 0.0)
+        todo += [(k, under) for k in kids.get(pid, [])]
+    return total
+
+
 def codex_window_chat(pid, home, opened, known=None):
-    """The chat file the Codex window started by ccd is showing: the one its processes hold open, else the one it
-    was asked to reopen, else the newest chat begun in this folder since the window opened."""
+    """The chat file the Codex window started by ccd is showing: of the chats its processes hold open (not a
+    sub-agent's nor a `codex exec`'s), the one it was asked to reopen, else the newest; when nothing is held, the
+    one it was asked to reopen, else the newest chat begun in this folder since the window opened that no other
+    Codex holds."""
     pids, table = [pid], ps_table() or ''  # the codex command may be a small launcher for the real program
     kids = {}
     for line in table.splitlines():
@@ -2314,8 +2459,10 @@ def codex_window_chat(pid, home, opened, known=None):
         out = subprocess.run(['/usr/sbin/lsof', '-w', '-Fn', '-p', ','.join(map(str, pids))], capture_output=True,
                              text=True, timeout=10).stdout
         held = [l[1:] for l in out.splitlines() if l.startswith('n') and l.endswith('.jsonl') and '/rollout-' in l]
-        if held:
-            return held[-1]
+        own = [f for f in held if codex_own(codex_meta(f))]
+        mine = [f for f in own if known and f.endswith('-%s.jsonl' % known)]
+        if mine or own:
+            return (mine or sorted(own, key=lambda f: codex_when(codex_meta(f).get('timestamp'))))[-1]
     except Exception:
         pass
     files = codex_files(home)
@@ -2324,18 +2471,19 @@ def codex_window_chat(pid, home, opened, known=None):
         if mine:
             return max(mine, key=os.path.getmtime)
     here = os.path.realpath(os.getcwd())
+    others = codex_open_files() or {}
     fresh = []
     for f in files:
         try:
-            if os.path.getmtime(f) < opened - 5:
+            if os.path.getmtime(f) < opened - 5 or os.path.realpath(f) in others:
                 continue
-            with open(f, 'rb') as fh:
-                meta = json.loads(fh.readline(1 << 20)).get('payload') or {}
-        except (OSError, ValueError, AttributeError):
+        except OSError:
             continue
-        if meta.get('originator') == 'codex-tui' and os.path.realpath(meta.get('cwd') or '') == here:
-            fresh.append(f)
-    return max(fresh, key=os.path.getmtime) if fresh else None
+        meta = codex_meta(f)
+        begun = codex_when(meta.get('timestamp'))
+        if codex_own(meta) and begun >= opened - 5 and os.path.realpath(meta.get('cwd') or '') == here:
+            fresh.append((begun, f))
+    return max(fresh)[1] if fresh else None
 
 
 def codex_room_elsewhere(account, want=None, avoid=()):
@@ -2352,7 +2500,7 @@ def codex_room_elsewhere(account, want=None, avoid=()):
 def codex_watch(pid, account, home, want, move, stop, stopped_on=None, known=None):
     """ccd's watch() for a Codex window: once its chat has stopped at a usage limit, nothing it started is
     working and another account has room, it closes the window and leaves in `move` where to reopen it."""
-    path = None
+    path, noted = None, {}
     retry_at, quiet = 0, None
     opened = time.time()
     while not stop.wait(WATCH_EVERY):
@@ -2361,14 +2509,16 @@ def codex_watch(pid, account, home, want, move, stop, stopped_on=None, known=Non
                 return
             path = codex_window_chat(pid, home, opened, known) or path
             st = path and codex_state(path)
+            if st and st.get('id') and st['id'] != noted.get('id'):
+                noted['id'] = codex_ran_on(st['id'], account) and st['id']
             if not st or not st['limited'] or st['when'] < opened:
                 quiet, retry_at = None, 0
                 continue
             now = time.time()
             if now - st['when'] < GRACE:
                 continue
-            table = ps_table()  # a command it left running (a build) is left to finish; an idle server is not
-            if table is None or tree_load(table, pid) > CPU_BUSY:
+            table = codex_ps_table()  # a command it left running (a build) is left to finish; a server it uses is not
+            if table is None or (codex_shell_load(table, pid) > CPU_BUSY and now - st['when'] < CODEX_BUSY_MAX):
                 quiet = None
                 continue
             quiet = quiet or now
@@ -2383,9 +2533,11 @@ def codex_watch(pid, account, home, want, move, stop, stopped_on=None, known=Non
             if not (again and again['limited'] and again['when'] >= opened):
                 continue  # it carried on by itself while the accounts were checked
             move['going'] = True
+            codex_moving(again['id'], os.getpid())
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
+                codex_moving(again['id'], done=True)
                 move.clear()
                 return
             move.update(id=again['id'], path=path, to=to, old=account)
@@ -2414,10 +2566,17 @@ def codex_supervise(args, env, account, want, known=None):
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, pass_on)
     words = codex_flags(settings(), args) + args
+    env = dict(env, CCD_BEHIND=str(os.getpid()))  # lets `cxr` see that a chat's window has cx behind it
+    moving = None
     while True:
         move, stop = {}, threading.Event()
         child = subprocess.Popen([CODEX] + words, env=env, close_fds=False)
         state['pid'] = child.pid
+        if moving:  # the reopened window opens the chat in a moment; until then cxr still waits
+            t = threading.Timer(15, codex_moving, (moving,), {'done': True})
+            t.daemon = True  # a marker left by a cx that has ended is ignored anyway
+            t.start()
+            moving = None
         if state['closing']:
             pass_on(signal.SIGTERM, None)
         home = env.get('CODEX_HOME', CODEX_MAIN)
@@ -2429,19 +2588,24 @@ def codex_supervise(args, env, account, want, known=None):
         if move.get('going'):
             watcher.join(5)
         to = move.get('to')
+        if move.get('id') and (not to or state['closing']):
+            codex_moving(move['id'], done=True)
         if not to or state['closing']:
             return code
+        moving = move['id']
         tidy_terminal(saved)
-        print('cxd: this chat reached its limit on %s. Carrying on, on %s (%s).'
+        print('cx: this chat reached its limit on %s. Carrying on, on %s (%s).'
               % (names.get(account, account), to['label'], how_full(to)), file=sys.stderr)
         try:
             codex_copy(move['path'], home, homes.get(to['key'], to['home']))
         except OSError as e:
-            print('cxd: could not copy the chat to %s (%s). It stays here.' % (to['label'], e), file=sys.stderr)
+            print('cx: could not copy the chat to %s (%s). It stays here.' % (to['label'], e), file=sys.stderr)
+            codex_moving(moving, done=True)
             return code
         note_move(move['id'], account, to['key'])
+        codex_ran_on(move['id'], to['key'])
         stopped_on[account] = time.time()
-        said = '(cxd moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
+        said = '(cx moved this chat from %s to %s at %s, because the first reached its usage limit.) ' % (
             names.get(account, account), to['label'], time.strftime('%H:%M'))
         account, known = to['key'], move['id']
         env = dict(env, **codex_env(homes.get(to['key'], to['home'])))
@@ -2496,25 +2660,25 @@ def codex_login(home):
 
 
 def cmd_cx_add(args):
-    """`cxd add [name]`: add another of your Codex accounts, in a folder of its own (~/.codex-<name>). A folder
+    """`cx add [name]`: add another of your Codex accounts, in a folder of its own (~/.codex-<name>). A folder
     of that name that is already signed in is used as it is."""
     if not CODEX:
-        sys.exit('cxd add: Codex is not installed: https://developers.openai.com/codex/cli')
+        sys.exit('cx add: Codex is not installed: https://developers.openai.com/codex/cli')
     name = ' '.join(args).strip()
     if not sys.stdin.isatty():  # a script or an agent: only a folder that is already signed in can be added
         if not name:
-            sys.exit('cxd add: give the account a name, e.g. cxd add Work')
+            sys.exit('cx add: give the account a name, e.g. cx add Work')
         got, why = codex_keep(name)
         if not got:
-            sys.exit('cxd add: nothing added: %s' % why)
-        print('cxd: added %s (%s), in %s' % (got['label'], figures(got), got['home'].replace(os.path.expanduser('~'), '~', 1)))
+            sys.exit('cx add: nothing added: %s' % why)
+        print('cx: added %s (%s), in %s' % (got['label'], figures(got), got['home'].replace(os.path.expanduser('~'), '~', 1)))
         if got.get('moved'):
-            print('cxd: its %d chats moved into ~/.codex/sessions, so every account sees them' % got['moved'])
+            print('cx: its %d chats moved into ~/.codex/sessions, so every account sees them' % got['moved'])
         return 0
     try:
         ask = Ask()
     except (OSError, termios.error):
-        sys.exit('cxd add: no terminal to ask in.')
+        sys.exit('cx add: no terminal to ask in.')
     try:
         return cx_add_here(ask, name)
     except KeyboardInterrupt:
@@ -2527,11 +2691,11 @@ def cmd_cx_add(args):
 def cx_add_here(ask, name=''):
     teal, dim, warm = colour(STOPS[0]), '2', colour((251, 191, 36))
     ask.say([[], [('  ✦  ', teal), ('Add a Codex account', '1')],
-             [('     Codex keeps each login in a folder of its own. cxd makes one for this', dim)],
+             [('     Codex keeps each login in a folder of its own. cx makes one for this', dim)],
              [('     account, with your usual settings, AGENTS.md and skills. Then Codex opens', dim)],
              [('     a page in your browser: sign in there with the account you want to add.', dim)], []])
     if not name:
-        name = ask.text('What should cxd call this account?', default='Codex %d' % (len(codex_added()) + 2),
+        name = ask.text('What should cx call this account?', default='Codex %d' % (len(codex_added()) + 2),
                         hint='Whose it is works best, e.g. "Work" or "Personal"')
         if name is None:
             return 130
@@ -2549,37 +2713,37 @@ def cx_add_here(ask, name=''):
 
 
 def cmd_cx_accounts(args):
-    """`cxd accounts`: every Codex account with its 5-hour and weekly limits."""
+    """`cx accounts`: every Codex account with its 5-hour and weekly limits."""
     global PLAIN
     codex_share_all()
     if not sys.stdout.isatty():
         PLAIN = True
     accts = codex_check(codex_accounts())
     cols = shutil.get_terminal_size((80, 24)).columns
-    print('\n'.join(paint(l, cols) for l in usage_lines(accts, cols, 'cxd')))
+    print('\n'.join(paint(l, cols) for l in usage_lines(accts, cols, 'cx')))
     return 0
 
 
 def cmd_cx_remove(args):
-    """`cxd remove <name>`: forget a Codex account added with `cxd add`. Its folder, with its chats, stays."""
+    """`cx remove <name>`: forget a Codex account added with `cx add`. Its folder, with its chats, stays."""
     name = ' '.join(args).strip()
     if name.lower() in ('main', 'your codex login'):
-        sys.exit('cxd: that is your usual Codex login. To sign out of it, run: codex logout')
+        sys.exit('cx: that is your usual Codex login. To sign out of it, run: codex logout')
     hit = [a for a in codex_added() if name and (a[0] == name or a[1].lower() == name.lower())]
     if not hit:
-        sys.exit('cxd: no Codex account called "%s". Yours: %s'
+        sys.exit('cx: no Codex account called "%s". Yours: %s'
                  % (name, ', '.join(l for _, l, _ in codex_added()) or 'none added yet'))
     key, label, home = hit[0]
     d = settings()
     d['codex_accounts'] = [a for a in d.get('codex_accounts') or [] if not (isinstance(a, dict) and a.get('key') == key)]
     save_settings(d)
-    print('cxd: removed %s. Its folder %s is left as it is, with its chats.'
+    print('cx: removed %s. Its folder %s is left as it is, with its chats.'
           % (label, home.replace(os.path.expanduser('~'), '~', 1)))
     return 0
 
 
 def cmd_cx_help(args):
-    print(CXD_DOC)
+    print(CX_DOC)
     return 0
 
 
@@ -2594,10 +2758,10 @@ CX_COMMANDS = {'add': cmd_cx_add, 'accounts': cmd_cx_accounts, 'usage': cmd_cx_a
 def main():
     args = sys.argv[1:]
     called = os.path.basename(sys.argv[0]) if sys.argv else ''
-    if called in ('cxd', 'cxdm', 'cxdr'):  # the same program for Codex
+    if called in ('cx', 'cxm', 'cxr'):  # the same program for Codex
         if args[:1] and args[0] in CX_COMMANDS:
             sys.exit(CX_COMMANDS[args[0]](args[1:]) or 0)
-        sys.exit(cxd_main(called, args) or 0)
+        sys.exit(cx_main(called, args) or 0)
     if args[:1] and args[0] in COMMANDS:
         sys.exit(COMMANDS[args[0]](args[1:]) or 0)
     if called == 'ccdm':  # the same program under its other names

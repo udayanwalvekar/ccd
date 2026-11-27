@@ -34,12 +34,12 @@ out="$(run "$H" bash "$PWD/ccd.sh")" && [ -x "$H/.local/share/ccd/ccd" ] && [ -L
 v="$(run "$H" "$H/.local/bin/ccd" --version)" || true; [ "$v" = "ccd $(sed -n "s/^VERSION = '\(.*\)'$/\1/p" ccd)" ] \
   && ok "ccd --version answers ($v)" || bad "ccd --version: $v"
 grep -q "is installed" <<<"$out" && ok "says what to do next" || bad "no closing words: $out"
-[ -L "$H/.local/bin/cxd" ] && [ -L "$H/.local/bin/cxdm" ] && [ -L "$H/.local/bin/cxdr" ] \
-  && [ "$(readlink "$H/.local/bin/cxd")" = "$H/.local/share/ccd/ccd" ] && ok "cxd, cxdm and cxdr installed too" \
-  || bad "cxd links: $(ls -l "$H/.local/bin")"
-v="$(run "$H" "$H/.local/bin/cxd" help)" || true; grep -q "ccd for Codex" <<<"$v" \
-  && ok "cxd help answers" || bad "cxd help: $v"
-v="$(run "$H" "$H/.local/bin/cxd" --version)" || true; [ "${v%% *}" = "cxd" ] && ok "cxd --version says cxd" || bad "cxd --version: $v"
+[ -L "$H/.local/bin/cx" ] && [ -L "$H/.local/bin/cxm" ] && [ -L "$H/.local/bin/cxr" ] \
+  && [ "$(readlink "$H/.local/bin/cx")" = "$H/.local/share/ccd/ccd" ] && ok "cx, cxm and cxr installed too" \
+  || bad "cx links: $(ls -l "$H/.local/bin")"
+v="$(run "$H" "$H/.local/bin/cx" help)" || true; grep -q "ccd for Codex" <<<"$v" \
+  && ok "cx help answers" || bad "cx help: $v"
+v="$(run "$H" "$H/.local/bin/cx" --version)" || true; [ "${v%% *}" = "cx" ] && ok "cx --version says cx" || bad "cx --version: $v"
 
 H="$(fresh piped)"
 out="$(run "$H" bash -c "cat '$PWD/ccd.sh' | bash; echo AFTER")" || true

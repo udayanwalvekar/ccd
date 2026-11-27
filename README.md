@@ -37,26 +37,26 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 "claude_args": []
 ```
 
-## Codex too: cxd
+## Codex too: cx
 
-`cxd` is ccd for Codex, and works the same way. It starts every chat in dangerously mode (`--dangerously-bypass-approvals-and-sandbox`) on whichever of your Codex accounts has the most usage left, and when a chat hits its limit, it moves it to another account by itself.
+`cx` is ccd for Codex, and works the same way. It always starts Codex in yolo mode (`--dangerously-bypass-approvals-and-sandbox`) on whichever of your Codex accounts has the most usage left, and when a chat hits its limit, it moves it to another account by itself.
 
 | Type | What it does |
 |---|---|
-| `cxd` | Starts Codex on the account with the most usage left. |
-| `cxdm` | Shows your Codex accounts and how much is left on each. You pick one. |
-| `cxdr` | Shows your recent Codex chats. You pick a chat, then an account, and it carries on there. |
-| `cxd 200` | Only uses your $200 accounts. `cxd 100` only your $100 ones. Works with `cxdm` and `cxdr` too. |
-| `cxd accounts` | Shows how much is left on every Codex account. |
-| `cxd add` | Adds another Codex account. You sign in to it in your browser. |
-| `cxd remove <name>` | Forgets an account. Its folder and chats stay. |
-| `CCD_AUTO=0 cxd` | Starts a chat that won't move by itself. |
+| `cx` | Starts Codex on the account with the most usage left. |
+| `cxm` | Shows your Codex accounts and how much is left on each. You pick one. |
+| `cxr` | Shows your recent Codex chats. You pick a chat, then an account, and it carries on there. |
+| `cx 200` | Only uses your $200 accounts. `cx 100` only your $100 ones. Works with `cxm` and `cxr` too. |
+| `cx accounts` | Shows how much is left on every Codex account. |
+| `cx add` | Adds another Codex account. You sign in to it in your browser. |
+| `cx remove <name>` | Forgets an account. Its folder and chats stay. |
+| `CCD_AUTO=0 cx` | Starts a chat that won't move by itself. |
 
-Codex keeps each login in a folder of its own, so every account you add gets one: `~/.codex-<name>`. It links `config.toml`, `AGENTS.md`, `rules`, `skills` and your chats (`sessions`) to your usual `~/.codex`, so every account works the same, and every chat is in one place, like Claude's: plain `codex resume` finds it whichever account it ran on. Already have a signed-in `~/.codex-<name>` folder? `cxd add <name>` uses it, and moves its chats into `~/.codex/sessions` (a chat that is in both keeps its newer copy; the older one goes to `~/.codex/sessions-older-copies`).
+Codex keeps each login in a folder of its own, so every account you add gets one: `~/.codex-<name>`. It links `config.toml`, `AGENTS.md`, `rules`, `skills` and your chats (`sessions`) to your usual `~/.codex`, so every account works the same, and every chat is in one place, like Claude's: plain `codex resume` finds it whichever account it ran on. Already have a signed-in `~/.codex-<name>` folder? `cx add <name>` uses it, and moves its chats into `~/.codex/sessions` (a chat that is in both keeps its newer copy; the older one goes to `~/.codex/sessions-older-copies`).
 
 ccd never reads a Codex token: it asks Codex itself (`codex app-server`) how much is left. A move reopens the same chat on the new account, and Codex sends the carry-on note by itself. The move works like ccd's: it waits 20 seconds, waits for a command that's still working, and checks again every 5 minutes if no account has room.
 
-Want Codex's own approvals back? Add `"codex_args": []` to `~/.config/ccd/config.json`. Your own `--sandbox`, `--ask-for-approval` or `--full-auto` also replaces the default for that chat.
+Want Codex's own approvals back? Add `"codex_args": []` to `~/.config/ccd/config.json`. Your own `--sandbox`, `--ask-for-approval` or `--approve-for-me` also replaces the default for that chat.
 
 ## Setup
 
