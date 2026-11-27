@@ -68,6 +68,7 @@ For the rare time I want to move a chat by hand, there's `ccdr` (r = resume): pi
 ## How the move works
 
 - ccd waits 20 seconds first, so you can read the limit message.
+- It does the same when Claude stops with "Your organization has disabled Claude subscription access for Claude Code": that account can't go on either.
 - If the chat has a command still working, like a build, it waits until that's done. Something that just sits there, like a preview server, isn't waited for: it stops with the move, and Claude is told to restart it.
 - If no account has room, the chat stays as it is, and ccd checks again every 5 minutes.
 - Every automatic move is written to `~/.config/ccd/moves.log`.
