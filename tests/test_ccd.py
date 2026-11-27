@@ -4,11 +4,14 @@ Run: python3 -I tests/test_ccd.py"""
 import io, json, os, re, signal, sys, tempfile, time, unittest
 from contextlib import redirect_stderr
 from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from unittest import mock
 
 os.environ['CCD_HOME'] = tempfile.mkdtemp(prefix='ccd-test-')  # never the real settings or Keychain
 os.environ['CCD_TOKEN_STORE'] = 'file'
-ccd = SourceFileLoader('ccd', os.path.join(os.path.dirname(__file__), '..', 'ccd')).load_module()
+_loader = SourceFileLoader('ccd', os.path.join(os.path.dirname(__file__), '..', 'ccd'))
+ccd = module_from_spec(spec_from_loader('ccd', _loader))
+_loader.exec_module(ccd)  # load_module() is gone from Python 3.15
 ccd.CLAUDE = os.path.join(os.environ['CCD_HOME'], 'no-such-claude')  # never the real claude, whatever slips through
 ccd.FLAGS = ['--dangerously-skip-permissions']  # what most of these tests were written with (a setting, off by default)
 

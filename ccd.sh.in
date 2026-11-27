@@ -2,8 +2,8 @@
 # ccd, in one file. Install it with:   bash ccd.sh
 # or, from anywhere:   curl -fsSL https://raw.githubusercontent.com/udayanwalvekar/ccd/main/ccd.sh | bash
 #
-# What it does: puts ccd, ccdm and ccdr on this Mac (the program goes in ~/.local/share/ccd, the three commands
-# in a folder already on your PATH), then opens a short welcome that offers to add your other Claude accounts.
+# What it does: puts ccd, ccdm and ccdr (and cx, cxm and cxr, the same for Codex) on this Mac (the program goes
+# in ~/.local/share/ccd, the commands in a folder already on your PATH), then opens a short welcome that offers to add your other Claude accounts.
 # Nothing is downloaded: the program is inside this file. Changes nothing else.
 # Remove it all again with:   ccd uninstall
 set -euo pipefail
@@ -76,7 +76,7 @@ if [ -z "$BIN" ]; then  # none: ~/.local/bin, and a PATH line for it unless thei
 fi
 
 BLOCKED=""
-for n in ccd ccdm ccdr; do
+for n in ccd ccdm ccdr cx cxm cxr; do
   t="${BIN}/${n}"
   if [ -e "$t" ] || [ -L "$t" ]; then
     if [ ! -L "$t" ] || [ "$(readlink "$t")" != "${SHARE}/ccd" ]; then
@@ -90,8 +90,8 @@ done
 
 # Their own alias or function called ccd would win over the program.
 for rc in "${HOME}/.zshrc" "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.zprofile"; do
-  if grep -Eqs '^[[:space:]]*(alias[[:space:]]+(ccd|ccdm|ccdr)=|(function[[:space:]]+)?(ccd|ccdm|ccdr)[[:space:]]*\(\))' "$rc"; then
-    note "ccd install: ${rc/#$HOME/~} has its own ccd, ccdm or ccdr alias, which wins over this one. Remove it to use ccd."
+  if grep -Eqs '^[[:space:]]*(alias[[:space:]]+(ccd|ccdm|ccdr|cx|cxm|cxr)=|(function[[:space:]]+)?(ccd|ccdm|ccdr|cx|cxm|cxr)[[:space:]]*\(\))' "$rc"; then
+    note "ccd install: ${rc/#$HOME/~} has its own ccd, ccdm, ccdr, cx, cxm or cxr alias, which wins over this one. Remove it to use ccd."
   fi
 done
 
