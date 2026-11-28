@@ -39,7 +39,7 @@ for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 pytho
 done
 [ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
 
-if ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
+if [ -z "${CCD_PROGRAM_ONLY:-}" ] && ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
   fail "install Claude Code first: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
@@ -1730,6 +1730,12 @@ def cmd_uninstall(args):
             ask.close()
         if a != 0:
             return 130
+    for waited in range(90):  # an update that is running would put ccd back: wait for it, then keep new ones out
+        if take_lock():
+            break
+        if not waited:
+            print('ccd: waiting for a ccd update to finish…', file=sys.stderr)
+        time.sleep(1)
     for key, _, _ in mine:
         token_del(key)
     if not file_store():  # and any left behind by a settings file that was lost or edited
@@ -1747,10 +1753,6 @@ def cmd_uninstall(args):
         except OSError:
             pass
     try:
-        os.rmdir(LOCK)
-    except OSError:
-        pass
-    try:
         os.rmdir(HOME)  # only if nothing else is in it
     except OSError:
         pass
@@ -1763,6 +1765,11 @@ def cmd_uninstall(args):
     share = os.path.expanduser('~/.local/share/ccd')
     if os.path.dirname(me) == os.path.realpath(share):
         shutil.rmtree(share, ignore_errors=True)
+    free_lock()  # last: an update that starts after this finds no ccd to update
+    try:
+        os.rmdir(HOME)
+    except OSError:
+        pass
     print('ccd: removed. Your chats and your Claude Code login are untouched.')
     return 0
 
@@ -1778,6 +1785,33 @@ CHECKED = os.path.join(HOME, 'update-checked')  # its time = when a chat start l
 UPDATED = os.path.join(HOME, 'updated')  # "1.0.5 1.0.6", left by a background update for the next start to say
 LOCK = os.path.join(HOME, 'update-lock')
 CHECK_EVERY = 24 * 3600
+PROGRAM = os.path.expanduser('~/.local/share/ccd/ccd')  # where ccd.sh installs the program; only that copy updates
+
+
+def take_lock():
+    """True when this process now holds the update lock. One older than an hour was left by an update that was
+    killed (a shutdown) and is taken over."""
+    try:
+        os.makedirs(HOME, mode=0o700, exist_ok=True)
+        os.mkdir(LOCK)
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(LOCK) < 3600:
+                return False
+            os.utime(LOCK)
+            return True
+        except OSError:
+            return False
+    except OSError:
+        return False
+
+
+def free_lock():
+    try:
+        os.rmdir(LOCK)
+    except OSError:
+        pass
 
 
 def self_update():
@@ -1788,11 +1822,13 @@ def self_update():
         with open(UPDATED) as f:
             was = f.read().split()
         os.unlink(UPDATED)
-        if len(was) == 2:
+        if len(was) == 2 and was[1] == VERSION:  # a note older than what runs now (a later `ccd update`) is dropped
             print('ccd updated itself: %s → %s' % tuple(was), file=sys.stderr)
     except OSError:
         pass
     if os.environ.get('CCD_SELF_UPDATE') == '0' or settings().get('self_update', True) is False:
+        return
+    if os.path.realpath(__file__) != os.path.realpath(PROGRAM):  # a copy run from elsewhere (a checkout) never would
         return
     try:
         if time.time() - os.path.getmtime(CHECKED) < CHECK_EVERY:
@@ -1813,30 +1849,20 @@ def cmd_update(args):
     """`ccd update`: fetch the newest ccd.sh and run it over this one. Accounts and settings stay as they are.
     `ccd update --auto` is the once-a-day background check (self_update): it writes only dated lines to its log,
     never exits with an error, and leaves a note for the next start to say."""
-    if '--auto' not in args:
-        return update(args, quiet=False)
-    try:
-        os.makedirs(HOME, mode=0o700, exist_ok=True)
-        os.mkdir(LOCK)
-    except FileExistsError:
-        try:
-            if time.time() - os.path.getmtime(LOCK) < 3600:
-                return 0  # another check is on it
-            os.utime(LOCK)  # left by one that was killed (a shutdown): take it over
-        except OSError:
+    quiet = '--auto' in args
+    if not take_lock():  # one update at a time (two would write the same new file), and never during an uninstall
+        if quiet:
             return 0
-    except OSError:
-        return 0
+        sys.exit('ccd update: another ccd update is running. Try again in a minute.')
     try:
-        return update(args, quiet=True)
-    except BaseException as e:  # a background check must never leave a lock or a traceback behind
-        print('%s ccd update --auto: %r' % (time.strftime('%Y-%m-%d %H:%M'), e))
+        return update(args, quiet)
+    except Exception as e:
+        if not quiet:
+            raise
+        print('%s ccd update --auto: %r' % (time.strftime('%Y-%m-%d %H:%M'), e))  # a background check never fails
         return 0
     finally:
-        try:
-            os.rmdir(LOCK)
-        except OSError:
-            pass
+        free_lock()
 
 
 def update(args, quiet):
@@ -1862,11 +1888,15 @@ def update(args, quiet):
         if not quiet:
             print('ccd: you have the newest, %s' % VERSION)
         return 0
+    if quiet and not os.path.exists(PROGRAM):  # removed meanwhile (an uninstall): never put it back
+        return stop('ccd is no longer installed. Nothing changed.')
     with tempfile.NamedTemporaryFile('wb', suffix='.sh', delete=False) as f:
         f.write(body)
+    env = dict(os.environ, CCD_NO_SETUP='1')
+    if quiet:
+        env['CCD_PROGRAM_ONLY'] = '1'  # in the background: the program only, never the links or the shell settings
     try:
-        code = subprocess.run(['/bin/bash', f.name], env=dict(os.environ, CCD_NO_SETUP='1'),
-                              stdout=subprocess.DEVNULL).returncode
+        code = subprocess.run(['/bin/bash', f.name], env=env, stdout=subprocess.DEVNULL).returncode
     finally:
         os.unlink(f.name)
     if code:
@@ -1876,6 +1906,10 @@ def update(args, quiet):
         with open(UPDATED, 'w') as f:
             f.write('%s %s\n' % (VERSION, new))
     else:
+        try:
+            os.unlink(UPDATED)  # a note from an earlier background update is out of date now
+        except OSError:
+            pass
         print('ccd: updated %s → %s' % (VERSION, new))
     return 0
 
@@ -2012,6 +2046,11 @@ chmod 755 "${SHARE}/ccd.new"
 "${SHARE}/ccd.new" --version >/dev/null 2>&1 </dev/null \
   || { rm -f "${SHARE}/ccd.new"; fail "ccd didn't start with ${PY}; nothing was changed"; }
 mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
+# ccd updating itself in the background: the program only. It runs with whatever PATH started the chat (a bot,
+# a launchd job), so the links and the shell's settings, set up by the person, are never touched from here.
+if [ -n "${CCD_PROGRAM_ONLY:-}" ]; then
+  exit 0
+fi
 
 # A folder already on PATH, so ccd works in this terminal straight away.
 BIN=""

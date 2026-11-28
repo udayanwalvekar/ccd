@@ -72,4 +72,18 @@ head -c 40000 ccd.sh > "$ROOT/cut.sh"
 if run "$H" bash "$ROOT/cut.sh" >/dev/null; then bad "a cut-short file said it worked"; else ok "a cut-short file fails"; fi
 [ -n "$before" ] && [ "$(shasum "$H/.local/share/ccd/ccd")" = "$before" ] && ok "...and changes nothing" || bad "a cut-short file changed ccd"
 
+# ccd updating itself in the background runs with whatever PATH started the chat (a bot, a launchd job): it
+# replaces the program and never touches the links or the shell's settings.
+H="$(fresh program-only)"
+run "$H" bash "$PWD/ccd.sh" >/dev/null || true
+rm -f "$H/.local/bin/ccdm"  # a link the person removed
+printf 'path+=(~/.local/bin)\n' > "$H/.zshrc" && cp "$H/.zshrc" "$ROOT/zshrc-before"
+printf '#!/bin/sh\necho old\n' > "$H/.local/share/ccd/ccd"
+out="$(limit 60 env -i HOME="$H" PATH="/usr/bin:/bin" CCD_TOKEN_STORE=file CCD_SELF_UPDATE=0 CCD_NO_SETUP=1 \
+  CCD_PROGRAM_ONLY=1 bash "$PWD/ccd.sh" </dev/null 2>&1)" && code=0 || code=$?
+v="$("$H/.local/share/ccd/ccd" --version 2>/dev/null </dev/null || true)"
+[ "$code" = 0 ] && [ "${v#ccd }" != "$v" ] && ok "a background update replaces the program ($v)" || bad "program-only: $code $v $out"
+cmp -s "$H/.zshrc" "$ROOT/zshrc-before" && [ ! -e "$H/.local/bin/ccdm" ] \
+  && ok "...and leaves the links and the shell settings alone" || bad "program-only touched links or .zshrc: $(cat "$H/.zshrc")"
+
 exit "$FAILED"

@@ -535,9 +535,10 @@ class SelfUpdate(Clean):
     installed for the next start, which says so once. Never a prompt, never in the middle of a chat."""
     def setUp(self):
         super().setUp()
-        on = mock.patch.dict(os.environ, {'CCD_SELF_UPDATE': '1'})
-        on.start()
-        self.addCleanup(on.stop)
+        for p in (mock.patch.dict(os.environ, {'CCD_SELF_UPDATE': '1'}),
+                  mock.patch.object(ccd, 'PROGRAM', os.path.realpath(ccd.__file__))):  # as if this were the installed copy
+            p.start()
+            self.addCleanup(p.stop)
 
     def start(self):
         err = io.StringIO()
@@ -580,9 +581,57 @@ class SelfUpdate(Clean):
         self.assertEqual(code, 0)
         self.assertEqual(run.call_args.args[0][0], '/bin/bash')
         self.assertNotIn('9.9.9', ''.join(l for l in said.splitlines() if not l[:4].isdigit()))  # only dated log lines
-        _, told = self.start()
-        self.assertIn('ccd updated itself: %s → 9.9.9' % ccd.VERSION, told)
-        self.assertEqual(self.start()[1], '')  # once
+        self.assertEqual(run.call_args.kwargs['env'].get('CCD_PROGRAM_ONLY'), '1')  # never the links or the shell's settings
+        was = ccd.VERSION
+        with mock.patch.object(ccd, 'VERSION', '9.9.9'):  # the next start runs the new one
+            _, told = self.start()
+            self.assertIn('ccd updated itself: %s → 9.9.9' % was, told)
+            self.assertEqual(self.start()[1], '')  # once
+
+    def test_a_note_older_than_what_runs_now_is_dropped_unsaid(self):
+        os.makedirs(ccd.HOME, exist_ok=True)
+        with open(ccd.UPDATED, 'w') as f:
+            f.write('1.0.0 1.0.1\n')  # a later `ccd update` went further
+        self.assertEqual(self.start()[1], '')
+        self.assertFalse(os.path.exists(ccd.UPDATED))
+
+    def test_a_copy_run_from_anywhere_else_never_updates(self):
+        with mock.patch.object(ccd, 'PROGRAM', '/nowhere/ccd'):
+            self.assertEqual(self.start()[0].call_count, 0)
+
+    def test_a_ccd_removed_meanwhile_is_never_put_back(self):
+        with mock.patch.object(ccd, 'PROGRAM', '/nowhere/ccd'):
+            _, _, run = self.auto()
+        run.assert_not_called()
+
+    def test_a_typed_update_waits_its_turn_and_takes_the_program_links_and_all(self):
+        os.makedirs(ccd.LOCK)
+        with mock.patch.object(ccd.subprocess, 'run') as run, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as e:
+                ccd.cmd_update([])
+        self.assertIn('another ccd update is running', str(e.exception.code))
+        run.assert_not_called()
+        os.rmdir(ccd.LOCK)
+        out = io.StringIO()
+        with mock.patch.object(ccd.urllib.request, 'urlopen', return_value=mock.Mock(read=lambda: NEWER)), \
+             mock.patch.object(ccd.subprocess, 'run', return_value=mock.Mock(returncode=0)) as run, \
+             redirect_stdout(out), redirect_stderr(out):
+            self.assertEqual(ccd.cmd_update([]), 0)
+        self.assertNotIn('CCD_PROGRAM_ONLY', run.call_args.kwargs['env'])
+        self.assertFalse(os.path.exists(ccd.LOCK))
+
+    def test_uninstall_waits_for_a_running_update_then_keeps_new_ones_out(self):
+        os.makedirs(ccd.LOCK)
+        slept = []
+
+        def sleep(n):  # the running update finishes during the first wait
+            slept.append(n)
+            os.rmdir(ccd.LOCK)
+        with mock.patch.object(ccd.time, 'sleep', sleep), mock.patch.object(sys, 'argv', ['/nowhere/ccd']), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(ccd.cmd_uninstall(['--yes']), 0)
+        self.assertEqual(slept, [1])
+        self.assertFalse(os.path.exists(ccd.HOME))
 
     def test_the_same_or_an_older_version_is_never_installed(self):
         for v in (ccd.VERSION, '0.1.0'):
@@ -630,7 +679,9 @@ class Uninstall(Clean):
         for n in ('ccd', 'ccdm'):
             os.symlink(prog, os.path.join(bin_dir, n))
         os.symlink('/bin/echo', os.path.join(bin_dir, 'ccdr'))  # someone else's: left alone
-        os.makedirs(os.path.join(ccd.HOME, 'update-lock'), exist_ok=True)  # what self-updating leaves goes too
+        os.makedirs(ccd.LOCK, exist_ok=True)  # what self-updating leaves goes too (this lock: left by a killed update)
+        old = time.time() - 2 * 3600
+        os.utime(ccd.LOCK, (old, old))
         for n in ('update-checked', 'updated', 'update.log'):
             open(os.path.join(ccd.HOME, n), 'w').close()
         with mock.patch.object(sys, 'argv', [prog]), mock.patch.dict(os.environ, {'PATH': bin_dir}), \
