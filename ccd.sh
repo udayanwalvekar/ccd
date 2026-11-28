@@ -282,7 +282,7 @@ def settle(accts):
 def named(label, plan):
     """An added account's name as ccd shows it: with the plan picked at `ccd add` after it, e.g. "Work ($200)",
     unless the name already says a price."""
-    return '%s ($%s)' % (label, plan) if plan and '$' not in label else label
+    return '%s ($%s)' % (label, plan) if plan and not re.search(r'\$\d', label) else label
 
 
 def accounts():
@@ -1468,12 +1468,12 @@ def keep(token, label, plan):
     got = ping({'key': 'new', 'label': label, 'token': token})
     if 'five' not in got:
         return None, got.get('error') or 'no answer'
-    for key, old_label, _ in added():
+    for key, old_label, old_plan in added():
         t = token_get(key)
         if t == token:
-            return None, 'already added, as %s' % old_label
+            return None, 'already added, as %s' % named(old_label, old_plan)
         if t and same_account(got, ping({'key': key, 'label': old_label, 'token': t})):
-            return None, 'that is the same account as %s' % old_label
+            return None, 'that is the same account as %s' % named(old_label, old_plan)
     d = settings()
     labels = {l.lower() for _, l, _ in added()}
     base, n = label, 2
@@ -1641,17 +1641,18 @@ def cmd_remove(args):
     """`ccd remove <name>`: forget an account added with `ccd add` (its token leaves the Keychain)."""
     name = ' '.join(args).strip()
     mine = added()
-    hit = [a for a in mine if name and (a[0] == name or a[1].lower() == name.lower())]
+    hit = [a for a in mine if name and (a[0] == name or name.lower() in (a[1].lower(), named(a[1], a[2]).lower()))]
     if name.lower() in ('main', 'your claude code login') or name.lower().startswith('your claude code login'):
         sys.exit("ccd: that is Claude Code's own login. To sign out of it, run /logout inside claude.")
     if not hit:  # never a near match
-        sys.exit('ccd: no account called "%s". Yours: %s' % (name, ', '.join(l for _, l, _ in mine) or 'none added yet'))
-    key, label, _ = hit[0]
+        sys.exit('ccd: no account called "%s". Yours: %s' % (name, ', '.join(named(l, p) for _, l, p in mine)
+                                                             or 'none added yet'))
+    key, label, plan = hit[0]
     token_del(key)
     d = settings()
     d['accounts'] = [a for a in d.get('accounts') or [] if not (isinstance(a, dict) and a.get('key') == key)]
     save_settings(d)
-    print('ccd: removed %s' % label)
+    print('ccd: removed %s' % named(label, plan))
     return 0
 
 
@@ -1694,7 +1695,7 @@ def cmd_setup(args):
                   ('Claude Code found' if has else 'Claude Code is not installed yet: https://claude.com/claude-code', '')],
                  [('  ✓ ' if me else '  · ', teal if me else dim),
                   (me['label'] if me else 'Not signed in to Claude Code yet: run claude once and sign in', '')]]
-                + [[('  ✓ ', teal), (label, '')] for _, label, _ in added()] + [[]])
+                + [[('  ✓ ', teal), (named(label, plan), '')] for _, label, plan in added()] + [[]])
         first = True
         while True:
             q = 'Add another Claude account now?' if first else 'Add one more?'

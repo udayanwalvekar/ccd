@@ -191,6 +191,18 @@ class Remove(Clean):
         self.assertIn('Yours: Work', said)
         self.assertEqual(len(ccd.added()), 1)
 
+    def test_remove_takes_the_name_as_typed_or_as_listed_with_its_plan(self):
+        self.add(TOKEN, 'Work', '200')
+        code, said = self.remove('Work ($200)')
+        self.assertEqual(code, 0)
+        self.assertIn('removed Work ($200)', said)
+        self.assertEqual(ccd.added(), [])
+
+    def test_a_dollar_sign_that_is_not_a_price_still_gets_the_plan(self):
+        self.assertEqual(ccd.named('$ave', 100), '$ave ($100)')
+        self.assertEqual(ccd.named("Kumar's account ($200)", 200), "Kumar's account ($200)")
+        self.assertEqual(ccd.named('Work', None), 'Work')
+
     def test_the_claude_code_login_is_not_ccds_to_remove(self):
         code, said = self.remove('main')
         self.assertIn('/logout', said)
