@@ -191,6 +191,18 @@ class Remove(Clean):
         self.assertIn('Yours: Work', said)
         self.assertEqual(len(ccd.added()), 1)
 
+    def test_remove_takes_the_name_as_typed_or_as_listed_with_its_plan(self):
+        self.add(TOKEN, 'Work', '200')
+        code, said = self.remove('Work ($200)')
+        self.assertEqual(code, 0)
+        self.assertIn('removed Work ($200)', said)
+        self.assertEqual(ccd.added(), [])
+
+    def test_a_dollar_sign_that_is_not_a_price_still_gets_the_plan(self):
+        self.assertEqual(ccd.named('$ave', 100), '$ave ($100)')
+        self.assertEqual(ccd.named("Kumar's account ($200)", 200), "Kumar's account ($200)")
+        self.assertEqual(ccd.named('Work', None), 'Work')
+
     def test_the_claude_code_login_is_not_ccds_to_remove(self):
         code, said = self.remove('main')
         self.assertIn('/logout', said)
@@ -276,6 +288,31 @@ class Screens(Clean):
         self.assertNotIn('\x1b', out.getvalue())
         self.assertIn('Work', out.getvalue())
         self.assertIn('revoked', out.getvalue())
+
+    def test_the_plan_picked_at_add_shows_next_to_the_name(self):
+        self.add(TOKEN, 'Work', '200')
+        self.assertEqual(ccd.added(), [('work', 'Work', 200)])  # kept as typed; the plan is shown, not stored in it
+        with mock.patch.object(ccd, 'login', return_value=None):
+            self.assertEqual([a['label'] for a in ccd.accounts()], ['Work ($200)'])
+        out = io.StringIO()
+        with mock.patch.object(ccd, 'login', return_value=None), \
+             mock.patch.object(ccd, 'ping', side_effect=answering()), redirect_stdout(out), \
+             mock.patch.object(ccd, 'PLAIN', False):
+            ccd.cmd_accounts([])
+        self.assertIn('Work ($200)', out.getvalue())
+
+    def test_a_name_that_already_says_its_plan_is_not_tagged_twice_and_no_plan_means_no_tag(self):
+        ccd.save_settings({'accounts': [{'key': 'k', 'label': "Kumar's account ($200)", 'plan': 200},
+                                        {'key': 'n', 'label': 'No plan'}]})
+        ccd.token_put('k', TOKEN)
+        ccd.token_put('n', OTHER)
+        with mock.patch.object(ccd, 'login', return_value=None):
+            self.assertEqual([a['label'] for a in ccd.accounts()], ["Kumar's account ($200)", 'No plan'])
+
+    def test_adding_says_the_plan_too(self):
+        code, said = self.add(TOKEN, 'Work', '100')
+        self.assertEqual(code, 0)
+        self.assertIn('added Work ($100)', said)
 
     def test_listing_lines_never_pass_the_window_edge(self):
         accts = [dict(key='a', label='A very long account name that goes on and on ' * 2, five=0.4, week=0.9,
