@@ -80,7 +80,7 @@ import time, tty
 import urllib.error, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = '1.0.4'
+VERSION = '1.0.5'
 API = 'https://api.anthropic.com/v1/messages'
 PING = json.dumps({'model': 'claude-haiku-5-5', 'max_tokens': 1,
                    'system': "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -279,12 +279,18 @@ def settle(accts):
     return accts
 
 
+def named(label, plan):
+    """An added account's name as ccd shows it: with the plan picked at `ccd add` after it, e.g. "Work ($200)",
+    unless the name already says a price."""
+    return '%s ($%s)' % (label, plan) if plan and '$' not in label else label
+
+
 def accounts():
     out = [a for a in [login()] if a]
     for key, label, plan in added():
         t = token_get(key)
         if t:
-            out.append({'key': key, 'label': label, 'token': t, 'plan': plan})
+            out.append({'key': key, 'label': named(label, plan), 'token': t, 'plan': plan})
     return out
 
 
@@ -1061,7 +1067,7 @@ def supervise(args, env, account, want):
     """Start claude and stay behind it. When its chat stops at a usage limit and another account has room, the
     chat is closed and the same chat reopened there, as often as it takes. Returns claude's exit code."""
     saved = terminal_state()
-    names = dict({'main': 'your Claude Code login'}, **{key: label for key, label, _ in added()})
+    names = dict({'main': 'your Claude Code login'}, **{key: named(label, plan) for key, label, plan in added()})
     state = {'pid': None, 'closing': False}
     stopped_on = {}  # account -> when this chat last stopped at a limit there
 
@@ -1478,7 +1484,7 @@ def keep(token, label, plan):
     d['accounts'] = [a for a in d.get('accounts') or [] if isinstance(a, dict) and a.get('key') != key] + [
         {'key': key, 'label': label, 'plan': plan}]
     save_settings(d)
-    got.update(key=key, label=label, plan=plan)
+    got.update(key=key, label=named(label, plan), plan=plan)
     return got, None
 
 
