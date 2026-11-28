@@ -23,7 +23,7 @@ run() {  # run a command in that home, with no terminal
   local h="$1"; shift
   case "$h" in "$ROOT"/*) ;; *) echo "refusing: $h is not a test home" >&2; exit 99 ;; esac
   limit 60 env -i HOME="$h" PATH="${EXTRA_PATH:-}$h/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" \
-    CCD_TOKEN_STORE=file ${CCD_NO_SETUP:+CCD_NO_SETUP=1} "$@" </dev/null 2>&1
+    CCD_TOKEN_STORE=file CCD_SELF_UPDATE=0 ${CCD_NO_SETUP:+CCD_NO_SETUP=1} "$@" </dev/null 2>&1
 }
 
 echo "ccd.sh, in throwaway homes:"

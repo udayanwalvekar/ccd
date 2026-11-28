@@ -2,7 +2,7 @@
 file), `ccd remove`, `ccd accounts`, the first-run screen without a terminal, reading the token off the sign-in
 screen, and the ccdm / ccdr names. No network, no real tokens, never touches the real Keychain or starts claude.
 Run: python3 -I tests/test_accounts.py"""
-import io, json, os, stat, sys, tempfile, unittest
+import io, json, os, stat, sys, tempfile, time, unittest
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.machinery import SourceFileLoader
 from unittest import mock
@@ -10,6 +10,7 @@ from unittest import mock
 SANDBOX = tempfile.mkdtemp(prefix='ccd-test-')
 os.environ['CCD_HOME'] = os.path.join(SANDBOX, 'config')  # before loading: where settings and tokens go
 os.environ['CCD_TOKEN_STORE'] = 'file'
+os.environ['CCD_SELF_UPDATE'] = '0'  # never a real background update from a test; the SelfUpdate tests switch it on
 ccd = SourceFileLoader('ccd_accounts', os.path.join(os.path.dirname(__file__), '..', 'ccd')).load_module()
 ccd.CLAUDE = os.path.join(SANDBOX, 'no-such-claude')  # a test that slips through to starting claude fails, never runs it
 
@@ -526,6 +527,99 @@ class Update(Clean):
         run.assert_not_called()
 
 
+NEWER = b"#!/usr/bin/env bash\nVERSION = '9.9.9'\nCCD_PROGRAM_END\n"
+
+
+class SelfUpdate(Clean):
+    """Like Claude Code: a chat start checks for a newer ccd at most once a day, in the background; the new one is
+    installed for the next start, which says so once. Never a prompt, never in the middle of a chat."""
+    def setUp(self):
+        super().setUp()
+        on = mock.patch.dict(os.environ, {'CCD_SELF_UPDATE': '1'})
+        on.start()
+        self.addCleanup(on.stop)
+
+    def start(self):
+        err = io.StringIO()
+        with mock.patch.object(ccd.subprocess, 'Popen') as bg, redirect_stderr(err):
+            ccd.self_update()
+        return bg, err.getvalue()
+
+    def auto(self, body=NEWER, installed=0, fetch=None):
+        out = io.StringIO()
+        with mock.patch.object(ccd.urllib.request, 'urlopen',
+                               side_effect=fetch, return_value=mock.Mock(read=lambda: body)), \
+             mock.patch.object(ccd.subprocess, 'run', return_value=mock.Mock(returncode=installed)) as run, \
+             redirect_stdout(out), redirect_stderr(out):
+            code = ccd.cmd_update(['--auto'])  # never exits: it runs in the background, nobody reads its code
+        return code, out.getvalue(), run
+
+    def test_a_start_checks_in_the_background_at_most_once_a_day(self):
+        bg, said = self.start()
+        bg.assert_called_once()
+        argv, kw = bg.call_args.args[0], bg.call_args.kwargs
+        self.assertEqual(argv[-2:], ['update', '--auto'])
+        self.assertTrue(kw.get('start_new_session'))  # its own: closing the chat or the window does not stop it
+        self.assertIs(kw.get('stdin'), ccd.subprocess.DEVNULL)
+        self.assertEqual(said, '')
+        self.assertEqual(self.start()[0].call_count, 0)  # the same day: no second check
+        old = time.time() - 25 * 3600
+        os.utime(ccd.CHECKED, (old, old))
+        self.assertEqual(self.start()[0].call_count, 1)  # a day later: checks again
+
+    def test_it_can_be_switched_off_in_the_settings_or_for_one_start(self):
+        ccd.save_settings({'self_update': False})
+        self.assertEqual(self.start()[0].call_count, 0)
+        ccd.save_settings({})
+        with mock.patch.dict(os.environ, {'CCD_SELF_UPDATE': '0'}):
+            self.assertEqual(self.start()[0].call_count, 0)
+        self.assertEqual(self.start()[0].call_count, 1)
+
+    def test_a_newer_version_is_installed_quietly_and_the_next_start_says_so_once(self):
+        code, said, run = self.auto()
+        self.assertEqual(code, 0)
+        self.assertEqual(run.call_args.args[0][0], '/bin/bash')
+        self.assertNotIn('9.9.9', ''.join(l for l in said.splitlines() if not l[:4].isdigit()))  # only dated log lines
+        _, told = self.start()
+        self.assertIn('ccd updated itself: %s → 9.9.9' % ccd.VERSION, told)
+        self.assertEqual(self.start()[1], '')  # once
+
+    def test_the_same_or_an_older_version_is_never_installed(self):
+        for v in (ccd.VERSION, '0.1.0'):
+            code, _, run = self.auto(("#!/usr/bin/env bash\nVERSION = '%s'\nCCD_PROGRAM_END\n" % v).encode())
+            self.assertEqual(code, 0)
+            run.assert_not_called()
+        self.assertFalse(os.path.exists(ccd.UPDATED))
+
+    def test_offline_broken_or_failed_updates_change_nothing_and_never_raise(self):
+        for kw in (dict(fetch=OSError('offline')), dict(body=b'<html>rate limited</html>'), dict(installed=1)):
+            code, said, _ = self.auto(**kw)
+            self.assertEqual(code, 0, kw)
+            self.assertFalse(os.path.exists(ccd.UPDATED), kw)
+        self.assertFalse(os.path.exists(ccd.LOCK))  # and the lock is let go every time
+
+    def test_two_checks_at_once_never_both_install(self):
+        os.makedirs(ccd.LOCK)
+        _, _, run = self.auto()
+        run.assert_not_called()
+        old = time.time() - 2 * 3600  # left by a check that was killed: taken over
+        os.utime(ccd.LOCK, (old, old))
+        _, _, run = self.auto()
+        run.assert_called_once()
+
+    def test_chat_starts_check_but_ccds_own_commands_do_not(self):
+        with mock.patch.object(ccd, 'self_update') as check, mock.patch.object(sys, 'argv', ['ccd', '--version']), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                ccd.main()
+        check.assert_not_called()
+        with mock.patch.object(ccd, 'self_update') as check, mock.patch.object(sys, 'argv', ['ccd']), \
+             mock.patch.object(ccd, 'accounts', return_value=[]), mock.patch.dict(os.environ, {'CCD_DRY_RUN': '1'}), \
+             redirect_stderr(io.StringIO()):
+            ccd.main()
+        check.assert_called_once()
+
+
 class Uninstall(Clean):
     def test_uninstall_removes_its_links_tokens_and_settings_only(self):
         self.add(TOKEN, 'Work')
@@ -536,6 +630,9 @@ class Uninstall(Clean):
         for n in ('ccd', 'ccdm'):
             os.symlink(prog, os.path.join(bin_dir, n))
         os.symlink('/bin/echo', os.path.join(bin_dir, 'ccdr'))  # someone else's: left alone
+        os.makedirs(os.path.join(ccd.HOME, 'update-lock'), exist_ok=True)  # what self-updating leaves goes too
+        for n in ('update-checked', 'updated', 'update.log'):
+            open(os.path.join(ccd.HOME, n), 'w').close()
         with mock.patch.object(sys, 'argv', [prog]), mock.patch.dict(os.environ, {'PATH': bin_dir}), \
              redirect_stdout(io.StringIO()):
             self.assertEqual(ccd.cmd_uninstall(['--yes']), 0)
