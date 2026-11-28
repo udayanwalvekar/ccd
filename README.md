@@ -25,7 +25,7 @@ It also gives you a bunch of customisations, listed below.
 | `ccd accounts` | Shows how much is left on every account. |
 | `ccd add` | Adds another account. |
 | `ccd remove <name>` | Forgets an account. |
-| `ccd update` | Gets the newest ccd. Your accounts stay. |
+| `ccd update` | Gets the newest ccd right now. You rarely need it: ccd updates itself (see below). Your accounts stay. |
 | `ccd uninstall` | Removes ccd and the accounts you added. |
 | `CCD_AUTO=0 ccd` | Starts a chat that won't move by itself. |
 
@@ -36,6 +36,8 @@ Want the permission prompts back? Open `~/.config/ccd/config.json` and add this 
 ```json
 "claude_args": []
 ```
+
+ccd updates itself, like Claude Code. About once a day, when you start a chat, it checks GitHub for a newer ccd in the background and installs it for next time. The chat you just started isn't touched. The next time you start ccd, it tells you once: `ccd updated itself: 1.0.6 → 1.0.7`. To turn this off, add `"self_update": false` to the same file, or start one chat with `CCD_SELF_UPDATE=0 ccd`.
 
 ## Setup
 

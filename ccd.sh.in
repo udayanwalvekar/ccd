@@ -39,7 +39,7 @@ for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 pytho
 done
 [ -n "$PY" ] || fail "ccd needs Python 3.9 or newer. Get it with: xcode-select --install   (then run this again)"
 
-if ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
+if [ -z "${CCD_PROGRAM_ONLY:-}" ] && ! command -v claude >/dev/null 2>&1 && [ ! -x "${HOME}/.local/bin/claude" ]; then
   fail "install Claude Code first: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
@@ -55,6 +55,11 @@ chmod 755 "${SHARE}/ccd.new"
 "${SHARE}/ccd.new" --version >/dev/null 2>&1 </dev/null \
   || { rm -f "${SHARE}/ccd.new"; fail "ccd didn't start with ${PY}; nothing was changed"; }
 mv -f "${SHARE}/ccd.new" "${SHARE}/ccd"
+# ccd updating itself in the background: the program only. It runs with whatever PATH started the chat (a bot,
+# a launchd job), so the links and the shell's settings, set up by the person, are never touched from here.
+if [ -n "${CCD_PROGRAM_ONLY:-}" ]; then
+  exit 0
+fi
 
 # A folder already on PATH, so ccd works in this terminal straight away.
 BIN=""
